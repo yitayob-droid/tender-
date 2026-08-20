@@ -48,16 +48,38 @@ class World:
         for letter in "ABCDEF":
             self.motors[letter] = {"pos": 0.0, "cmd": 0.0, "vel": 0.0,
                                    "lo": None, "hi": None}
-        self.motors["A"]["lo"], self.motors["A"]["hi"] = 0.0, 170.0
-        self.motors["C"]["lo"], self.motors["C"]["hi"] = 0.0, 100.0
         self.trace = []
-        self.carrying = None
+        self.carrying = 0
         self.placed = []
+        self._roles_done = False
+        self._closed_flag = False
+        self._prev_gpos = 0.0
 
         # ground truth mosaic used by the fake colour sensor
-        self.pattern = [["yellow", "green", "yellow"],
-                        ["blue", "white", "green"],
-                        ["green", "yellow", "blue"]]
+        # ground truth read off the mat photos: 4 across, 3 deep
+        self.pattern = [["blue", "yellow", "green", "yellow"],
+                        ["yellow", "blue", "white", "green"],
+                        ["blue", "yellow", "green", "yellow"]]
+
+    # -- wiring -------------------------------------------------------
+    def prog(self):
+        return sys.modules.get("mosaic_masters")
+
+    def ports(self):
+        """(left, right, lift, grabber) letters, taken from the program
+        so re-wiring the robot does not need a simulator edit."""
+        p = self.prog()
+        if p is None or not hasattr(p, "PORT_LEFT"):
+            return ("A", "E", "C", "B")
+        return (p.PORT_LEFT, p.PORT_RIGHT, p.PORT_LIFT, p.PORT_GRAB)
+
+    def _apply_roles(self):
+        if self._roles_done or self.prog() is None:
+            return
+        _, _, lift, grab = self.ports()
+        self.motors[lift]["lo"], self.motors[lift]["hi"] = 0.0, 170.0
+        self.motors[grab]["lo"], self.motors[grab]["hi"] = 0.0, 100.0
+        self._roles_done = True
 
     # -- integration --------------------------------------------------
     def step(self, ms):
@@ -66,7 +88,8 @@ class World:
             dt = 0.001
         self.t_ms += ms
 
-        self._update_grabber_load()
+        self._apply_roles()
+        self._update_blocks()
         for letter, m in self.motors.items():
             vel = m["cmd"]
             pos = m["pos"] + vel * dt
@@ -78,10 +101,11 @@ class World:
             m["pos"] = pos
             m["vel"] = vel
 
-        # differential drive: B is left, F is right.  The program feeds
-        # them opposite signs (LEFT_SIGN/RIGHT_SIGN), undo that here.
-        vl = self.motors["B"]["vel"] * CM_PER_DEG * WHEEL_SCALE_L
-        vr = -self.motors["F"]["vel"] * CM_PER_DEG * WHEEL_SCALE_R
+        # differential drive.  The program feeds the two sides opposite
+        # signs (LEFT_SIGN / RIGHT_SIGN), undo that here.
+        left, right, _, _ = self.ports()
+        vl = self.motors[left]["vel"] * CM_PER_DEG * WHEEL_SCALE_L
+        vr = -self.motors[right]["vel"] * CM_PER_DEG * WHEEL_SCALE_R
         v = (vl + vr) / 2.0
         omega = math.degrees((vl - vr) / TRACK)      # clockwise positive
 
@@ -95,30 +119,65 @@ class World:
                                round(self.x, 1), round(self.y, 1),
                                round(self.h, 1)))
 
-    def _update_grabber_load(self):
-        """A block in the jaws stops the grabber early.  A block is in
-        reach whenever the robot is nosed in at one of the depots."""
-        prog = sys.modules.get("mosaic_masters")
+    def _update_blocks(self):
+        """Model the magazine: blocks go in at a depot when the jaws
+        stall on one, and come out at the plate when the jaws open past
+        the release position with the lift down."""
+        prog = self.prog()
         if prog is None or not hasattr(prog, "DEPOTS"):
             return
-        near = False
+        g = prog.__dict__
+        _, _, lift, grab = self.ports()
+        gpos = self.motors[grab]["pos"]
+        lpos = self.motors[lift]["pos"]
+        size = g.get("MAGAZINE_SIZE", 1)
+
+        # A depot is not a point: the blocks run in a line from just in
+        # front of the stand position into the depot.  Measure the
+        # distance to that line, not to the stand.
+        near_depot = False
+        depth = (g.get("DEPOT_APPROACH_CM", 9.0)
+                 + g.get("DEPOT_BLOCK_PITCH_CM", 6.0) * (size - 1) + 4.0)
         for options in prog.DEPOTS.values():
             for opt in options:
                 dx, dy = opt["stand"]
-                if math.hypot(self.x - dx, self.y - dy) < 14.0:
-                    near = not NO_BLOCKS
-        c = self.motors["C"]
-        if near and self.carrying is None:
-            c["hi"] = 58.0            # jaws close onto a block
-        elif self.carrying is not None:
-            c["hi"] = 58.0            # still holding it
-        else:
-            c["hi"] = 100.0           # closing on air
-        if near and c["pos"] >= 57.0:
-            self.carrying = "block"
-        if self.carrying is not None and c["pos"] < 20.0:
-            self.placed.append((round(self.x, 1), round(self.y, 1)))
-            self.carrying = None
+                fr = math.radians(opt["face"])
+                fx, fy = math.sin(fr), math.cos(fr)
+                # project the robot onto the block line and clamp to it
+                t = (self.x - dx) * fx + (self.y - dy) * fy
+                t = max(0.0, min(depth, t))
+                if math.hypot(self.x - (dx + fx * t),
+                              self.y - (dy + fy * t)) < 12.0:
+                    near_depot = not NO_BLOCKS
+        near_plate = math.hypot(self.x - g["PLATE_X"],
+                                self.y - g["PLATE_Y"]) < 30.0
+        room = self.carrying < size
+
+        # The jaws stall early when there is a block to stall on, and
+        # stay stalled while they are still shut around it - filling the
+        # magazine does not make the block in the jaws disappear.
+        self.motors[grab]["hi"] = (
+            58.0 if ((near_depot and room) or self._closed_flag) else 100.0)
+
+        if near_depot and room and gpos >= 57.0 and not self._closed_flag:
+            self.carrying += 1
+            self._closed_flag = True
+        if gpos < 20.0:
+            self._closed_flag = False
+
+        # allow for the tool controller's own tolerance
+        # A block leaves the magazine on the downward crossing of the
+        # release position - edge triggered, so no hysteresis band has
+        # to be guessed.
+        release_at = (g.get("GRAB_RELEASE_ONE_DEG", 0)
+                      + g.get("TOOL_TOL_DEG", 6) + 6.0)
+        crossed = self._prev_gpos > release_at >= gpos
+        if near_plate and self.carrying > 0 and lpos <= 20.0 and crossed:
+            self.carrying -= 1
+            # record where the grabber is, which is where the block lands
+            bx, by = self.sensor_xy(g["GRAB_FWD_CM"], g["GRAB_SIDE_CM"])
+            self.placed.append((round(bx, 1), round(by, 1)))
+        self._prev_gpos = gpos
 
     # -- sensors ------------------------------------------------------
     def yaw_decideg(self):

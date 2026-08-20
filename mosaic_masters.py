@@ -22,11 +22,11 @@
 #
 #  HARDWARE (as wired on your robot)
 #  ---------------------------------
-#      A : up / down mechanism (lift)
-#      B : left drive wheel
-#      C : grabber (bottom)
-#      E : colour sensor (pointing down at the mat)
-#      F : right drive wheel
+#      A : left drive wheel
+#      B : grabber (bottom)
+#      C : up / down mechanism (lift)
+#      E : right drive wheel
+#      F : colour sensor (pointing down at the mat)
 #      hub : yaw / gyro used for straight driving and turning
 #
 #  IMPORTANT - READ README.md FIRST
@@ -60,11 +60,11 @@ import math
 MODE = "MISSION"
 
 # --- ports -----------------------------------------------------------
-PORT_LIFT   = "A"      # up / down mechanism
-PORT_LEFT   = "B"      # left wheel
-PORT_GRAB   = "C"      # grabber
-PORT_COLOUR = "E"      # colour sensor, looking down
-PORT_RIGHT  = "F"      # right wheel
+PORT_LEFT   = "A"      # left wheel
+PORT_GRAB   = "B"      # grabber
+PORT_LIFT   = "C"      # up / down mechanism
+PORT_RIGHT  = "E"      # right wheel
+PORT_COLOUR = "F"      # colour sensor, looking down
 
 # Motor polarity.  If the robot drives backwards when you run
 # TEST_DRIVE, flip BOTH of these.  If it spins on the spot instead of
@@ -177,40 +177,70 @@ COLOUR_SAMPLES  = 7        # readings averaged per measurement
 #  >>> MEASURE THESE ON YOUR OWN MAT AND EDIT THEM. <<<
 
 MAT_LENGTH_CM = 200.0
-MAT_WIDTH_CM  = 100.0
+MAT_WIDTH_CM  = 100.0   # CONFIRM - see README section 5, note 1
 
 # where the robot is placed before the run: x, y, heading
 START_X = 16.0
 START_Y = 22.0
 START_H = 90.0          # facing along the mat, to the right
 
-# The black mosaic plate in the middle.
-PLATE_X = 95.0          # centre of the plate
-PLATE_Y = 57.0
-GRID_ROWS = 3
-GRID_COLS = 3
-CELL_PITCH_CM = 4.0     # centre-to-centre distance between two cells
+# --- the black mosaic plate ------------------------------------------
+# From the AR tape measurements:
+#   * the grey square the plate sits in is 31 x 26 cm
+#   * from the middle of the plate's far edge (the "resolute." side of
+#     the mat) to that edge of the mat is 37 cm
+#   * the grid is 4 cells across by 3 deep, colours yellow / blue /
+#     green / white, with one white cell in the middle
+PLATE_ZONE_W_CM = 31.0        # grey square, across the mat (X)
+PLATE_ZONE_D_CM = 26.0        # grey square, up the mat (Y)
+PLATE_FAR_EDGE_TO_MAT_CM = 37.0
+
+GRID_COLS = 4                 # cells across the mat
+GRID_ROWS = 3                 # cells up the mat
+CELL_PITCH_CM = 5.0           # MEASURE: centre to centre of two cells
+PLATE_BORDER_CM = 1.5         # black rim outside the outer cells
+
+# depth of the black plate in Y, worked out from the grid
+PLATE_DEPTH_CM = (GRID_ROWS - 1) * CELL_PITCH_CM + 2 * PLATE_BORDER_CM
+
+# X is not pinned down by the measurements yet - see README section 5.
+PLATE_X = 95.0
+# Y comes straight off the 37 cm measurement, so it stays right even if
+# the mat turns out to be wider than MAT_WIDTH_CM says.
+PLATE_Y = MAT_WIDTH_CM - PLATE_FAR_EDGE_TO_MAT_CM - PLATE_DEPTH_CM / 2.0
+
 # Safe line the robot travels along when it moves around the plate.
-PLATE_APPROACH_Y = PLATE_Y - 22.0
-PLATE_LEAVE_Y    = PLATE_Y - 22.0
+PLATE_APPROACH_Y = PLATE_Y - PLATE_ZONE_D_CM / 2.0 - 8.0
+PLATE_LEAVE_Y    = PLATE_APPROACH_Y
 
 # Depots.  "stand" is where the robot parks, "face" is the heading it
 # takes there, and the block is straight ahead of the grabber.
 # There is a set on the left edge and a set on the right edge; the robot
 # automatically drives to whichever one is closer.
+# "row" is the heading the robot takes to slide along to the next block
+# in the same depot, and "pitch" is how far apart those blocks are.  That
+# is what lets one visit collect a magazine full instead of just one.
 DEPOTS = {
-    "yellow": [ {"stand": (30.0, 48.0), "face": 270.0},
-                {"stand": (176.0, 88.0), "face":  90.0} ],
-    "blue":   [ {"stand": (30.0, 60.0), "face": 270.0},
-                {"stand": (176.0, 55.0), "face":  90.0} ],
-    "green":  [ {"stand": (30.0, 72.0), "face": 270.0},
-                {"stand": (176.0, 72.0), "face":  90.0} ],
-    "white":  [ {"stand": (30.0, 86.0), "face": 270.0},
-                {"stand": (176.0, 36.0), "face":  90.0} ],
+    "yellow": [ {"stand": (30.0, 48.0), "face": 270.0, "row": 0.0},
+                {"stand": (176.0, 88.0), "face":  90.0, "row": 180.0} ],
+    "blue":   [ {"stand": (30.0, 60.0), "face": 270.0, "row": 0.0},
+                {"stand": (176.0, 55.0), "face":  90.0, "row": 180.0} ],
+    "green":  [ {"stand": (30.0, 72.0), "face": 270.0, "row": 0.0},
+                {"stand": (176.0, 72.0), "face":  90.0, "row": 180.0} ],
+    "white":  [ {"stand": (30.0, 86.0), "face": 270.0, "row": 0.0},
+                {"stand": (176.0, 36.0), "face":  90.0, "row": 180.0} ],
 }
 # How far the robot noses in from the "stand" point to close the
 # grabber around a block, and how far it backs off afterwards.
 DEPOT_APPROACH_CM = 9.0
+DEPOT_BLOCK_PITCH_CM = 6.0     # MEASURE: spacing of the blocks in a depot
+# How the blocks of one colour are laid out relative to the robot once
+# it is facing them:
+#   "IN_LINE"      one behind the other, so the robot just keeps driving
+#                  forward and sweeps them up - much the faster option
+#   "SIDE_BY_SIDE" spread across its path, so it has to step sideways
+#                  between blocks ("row" gives the direction)
+DEPOT_LAYOUT = "IN_LINE"
 
 # Travel lanes: two horizontal corridors the robot uses so that it never
 # cuts across the plate or the depots.
@@ -221,13 +251,25 @@ LANE_HIGH_Y = 92.0
 # "SCAN"  : read the pattern off the plate at the start of the run
 # "FIXED" : use FIXED_PATTERN below (type it in during inspection time)
 PATTERN_SOURCE = "SCAN"
+# rows far-to-near, columns left-to-right, as the robot sees them
 FIXED_PATTERN = [
-    ["yellow", "green",  "yellow"],
-    ["blue",   "white",  "green" ],
-    ["green",  "yellow", "blue"  ],
+    ["blue",   "yellow", "green", "yellow"],
+    ["yellow", "blue",   "white", "green" ],
+    ["blue",   "yellow", "green", "yellow"],
 ]
 # Cells whose colour is one of these are skipped (nothing to deliver).
 SKIP_COLOURS = ("black", "unknown", "red")
+
+# --- magazine --------------------------------------------------------
+# How many blocks the robot can carry in one trip.  With 3 the robot
+# makes one depot visit per three cells instead of one per cell, which
+# is roughly half the run time.
+MAGAZINE_SIZE = 3
+# "ONE_AT_A_TIME" : the mechanism can let go of a single block, so each
+#                   block is placed on its own cell (what the scoring
+#                   almost certainly wants)
+# "ALL_AT_ONCE"   : everything is dumped at the last cell of the trip
+RELEASE_MODE = "ONE_AT_A_TIME"
 # Time budget.  Set this to your rulebook's run time minus about 10 s
 # so the robot always has time to park.  The mission also refuses to
 # start a trip it cannot finish inside the budget.
@@ -243,9 +285,14 @@ GRAB_CLOSED_DEG = 95
 # with MODE = "TEST_TOOLS" (closed on a block vs closed on air).
 GRAB_EMPTY_DEG  = 85
 PICK_RETRIES    = 1
-LIFT_DOWN_DEG   = 0
-LIFT_CARRY_DEG  = 95
-LIFT_UP_DEG     = 160
+LIFT_DOWN_DEG    = 0     # jaws on the mat, ready to take a block
+LIFT_CARRY_DEG   = 95    # travelling height
+LIFT_UP_DEG      = 160   # fully raised, block tipped back into the bay
+LIFT_RELEASE_DEG = 10    # height the block is let go from
+# Grabber position that frees exactly ONE block from the magazine while
+# the rest stay held.  On a build with no separate gate this is just
+# GRAB_OPEN_DEG.  Find it with MODE = "TEST_TOOLS".
+GRAB_RELEASE_ONE_DEG = 35
 TOOL_TOL_DEG    = 6
 TOOL_TIMEOUT_S  = 3.0
 STALL_MS        = 350        # motor considered stalled after this
@@ -810,35 +857,52 @@ def has_block():
     return GRAB_SIGN * m_deg(PORT_GRAB) < GRAB_EMPTY_DEG
 
 
-async def pick_block():
-    """Nose in on a block, close the grabber, lift and back off.
-    Returns True if a block is actually in the jaws."""
-    face = heading()
+# ---------------------------------------------------------------------
+#  These two routines are the only place the program touches your
+#  specific collecting mechanism.  Everything else - routing, ordering,
+#  counting, timing - is independent of how the blocks are held, so if
+#  the magazine works differently on your build, change these two and
+#  nothing else.
+# ---------------------------------------------------------------------
+
+async def collect_one(step_cm, face):
+    """Drive step_cm onto the next block, close on it and tip it back
+    into the magazine.  The robot stays where it is afterwards - the
+    caller drives out of the depot once, at the end.
+
+    Returns (picked, distance_advanced)."""
+    advanced = 0.0
     await lift_to(LIFT_DOWN_DEG)
 
     for attempt in range(PICK_RETRIES + 1):
         await grab_open()
-        reach = DEPOT_APPROACH_CM + (2.5 * attempt)   # dig deeper on a retry
-        await drive_straight(reach, SLOW_PCT, hold_heading=face)
+        reach = step_cm if attempt == 0 else 2.5   # creep on a retry
+        advanced += await drive_straight(reach, SLOW_PCT, hold_heading=face)
         await grab_close()
         if has_block():
-            await lift_to(LIFT_CARRY_DEG)
-            await drive_straight(-reach, DRIVE_PCT, hold_heading=face)
-            return True
+            await lift_to(LIFT_UP_DEG)     # block goes back into the bay
+            await lift_to(LIFT_DOWN_DEG)   # ready for the next one
+            return (True, advanced)
         print("grab missed (grabber at {} deg), attempt {}".format(
             GRAB_SIGN * m_deg(PORT_GRAB), attempt + 1))
-        await drive_straight(-reach, SLOW_PCT, hold_heading=face)
 
     await grab_open()
-    await lift_to(LIFT_CARRY_DEG)
-    return False
+    return (False, advanced)
 
 
-async def place_block():
-    """Put the carried block down where the grabber is now."""
-    await lift_to(LIFT_DOWN_DEG)
-    await grab_open()
-    await drive_straight(-6.0, SLOW_PCT)
+async def release_one():
+    """Let go of a single block where the grabber is now, keeping hold
+    of the rest of the magazine."""
+    face = heading()
+    await lift_to(LIFT_RELEASE_DEG)
+    if RELEASE_MODE == "ALL_AT_ONCE":
+        await grab_open()
+    else:
+        await run_tool_to(PORT_GRAB, GRAB_RELEASE_ONE_DEG,
+                          motor_sign=GRAB_SIGN)
+    await sleep_ms(150)                    # let it settle onto the cell
+    await drive_straight(-5.0, SLOW_PCT, hold_heading=face)
+    await grab_close()                     # hold what is left
     await lift_to(LIFT_CARRY_DEG)
 
 
@@ -891,11 +955,17 @@ async def scan_pattern():
 #  MISSION PLANNING
 # =====================================================================
 
-def plan_tasks(pattern):
-    """Turn the pattern into an ordered list of (colour, row, col) jobs.
-    Jobs are grouped by colour so the robot makes one trip per depot
-    visit, and inside a colour they are ordered near-side first."""
-    tasks = []
+def plan_trips(pattern):
+    """Turn the pattern into a list of trips: (colour, [cells]).
+
+    Cells are grouped by colour so one depot visit fills the magazine,
+    and each trip carries at most MAGAZINE_SIZE blocks.
+
+    Inside a trip the cells are ordered FAR ROW FIRST.  That matters:
+    the robot reaches over the near cells to get to the far ones, so
+    filling the far row first means it never has to reach across a block
+    it has already placed."""
+    by_colour = {}
     for row in range(GRID_ROWS):
         for col in range(GRID_COLS):
             colour = pattern[row][col]
@@ -904,16 +974,19 @@ def plan_tasks(pattern):
             if colour not in DEPOTS:
                 print("no depot for", colour, "- skipping cell", row, col)
                 continue
-            tasks.append((colour, row, col))
+            by_colour.setdefault(colour, []).append((row, col))
 
-    ordered = []
+    trips = []
     for colour in ("yellow", "blue", "green", "white"):
-        group = [t for t in tasks if t[0] == colour]
-        group.sort(key=lambda t: -t[1])        # nearest row first
-        ordered.extend(group)
-    # anything with a depot but not in the list above
-    ordered.extend([t for t in tasks if t not in ordered])
-    return ordered
+        cells = by_colour.pop(colour, [])
+        cells.sort()                       # row 0 (far side) first
+        for i in range(0, len(cells), MAGAZINE_SIZE):
+            trips.append((colour, cells[i:i + MAGAZINE_SIZE]))
+    for colour, cells in by_colour.items():          # any other colour
+        cells.sort()
+        for i in range(0, len(cells), MAGAZINE_SIZE):
+            trips.append((colour, cells[i:i + MAGAZINE_SIZE]))
+    return trips
 
 
 def nearest_depot(colour):
@@ -944,29 +1017,78 @@ def path_to(x, y):
     return [(sx, lane), (x, lane), (x, y)]
 
 
-async def fetch(colour):
-    """Drive to a depot of that colour and pick up a block.
-    Returns True if the robot is now carrying one."""
+async def fetch(colour, wanted):
+    """Drive to a depot of that colour and fill the magazine.
+    Returns how many blocks are actually on board."""
     say(colour[:5].upper())
     depot = nearest_depot(colour)
     dx, dy = depot["stand"]
-    await route(path_to(dx, dy), DRIVE_PCT, final_heading=depot["face"])
-    return await pick_block()
+    face = depot["face"]
+    row_h = depot.get("row", 0.0)
+    pitch = depot.get("pitch", DEPOT_BLOCK_PITCH_CM)
+
+    await route(path_to(dx, dy), DRIVE_PCT, final_heading=face)
+
+    got = 0
+    into_depot = 0.0        # how far we have driven in, to reverse later
+    for i in range(wanted):
+        if i > 0 and DEPOT_LAYOUT == "SIDE_BY_SIDE":
+            # blocks are spread across our path: back out, step along
+            # the row, and line up on the next one
+            await drive_straight(-into_depot, DRIVE_PCT, hold_heading=face)
+            into_depot = 0.0
+            await turn_to(row_h, TURN_PCT, precise=False)
+            await drive_straight(pitch, DRIVE_PCT, hold_heading=row_h)
+            await turn_to(face, TURN_PCT, precise=True)
+
+        # blocks in line: the first one is DEPOT_APPROACH_CM ahead and
+        # each of the rest is one pitch further on, so we never reverse
+        step = DEPOT_APPROACH_CM if i == 0 else pitch
+        picked, advanced = await collect_one(step, face)
+        into_depot += advanced
+        if picked:
+            got += 1
+        else:
+            print("no block at position", i + 1, "of the", colour, "depot")
+            break                          # ran out of blocks, go deliver
+
+    await drive_straight(-into_depot, DRIVE_PCT, hold_heading=face)
+    await lift_to(LIFT_CARRY_DEG)
+    print("carrying", got, colour, "block(s)")
+    return got
 
 
-async def deliver(colour, row, col):
-    """Carry the block to its cell and drop it there."""
-    cx, cy = cell_xy(row, col)
-    # always approach the plate from the near side, facing +Y
-    stand_x, stand_y = tool_pose(cx, cy, 0.0, GRAB_FWD_CM, GRAB_SIDE_CM)
-    await route(path_to(stand_x, PLATE_APPROACH_Y), DRIVE_PCT,
-                final_heading=0.0)
-    await drive_straight(stand_y - POSE["y"], SLOW_PCT, hold_heading=0.0)
-    await place_block()
+async def deliver(colour, cells):
+    """Place one block on each of the cells, far row first."""
+    approach_done = False
+    for row, col in cells:
+        cx, cy = cell_xy(row, col)
+        # always approach the plate from the near side, facing +Y
+        stand_x, stand_y = tool_pose(cx, cy, 0.0, GRAB_FWD_CM, GRAB_SIDE_CM)
+        if not approach_done:
+            await route(path_to(stand_x, PLATE_APPROACH_Y), DRIVE_PCT,
+                        final_heading=0.0)
+            approach_done = True
+        else:
+            # already lined up in front of the plate: back out to the
+            # approach line, slide sideways, come in again
+            await drive_straight(PLATE_APPROACH_Y - POSE["y"], DRIVE_PCT,
+                                 hold_heading=0.0)
+            await goto(stand_x, PLATE_APPROACH_Y, DRIVE_PCT,
+                       final_heading=0.0)
+        # cover most of the run-in at speed, only creep the last bit
+        gap = stand_y - POSE["y"]
+        if gap > 7.0:
+            await drive_straight(gap - 5.0, DRIVE_PCT, hold_heading=0.0)
+            await drive_straight(5.0, SLOW_PCT, hold_heading=0.0)
+        else:
+            await drive_straight(gap, SLOW_PCT, hold_heading=0.0)
+        await release_one()
+        print("placed", colour, "at", row, col)
+
     # retreat to the travel lane before doing anything else
     await drive_straight(PLATE_LEAVE_Y - POSE["y"], DRIVE_PCT,
                          hold_heading=0.0)
-    print("placed", colour, "at", row, col)
 
 
 async def go_home():
@@ -979,6 +1101,36 @@ async def go_home():
 #  START UP
 # =====================================================================
 
+def geometry_check():
+    """Print anything about the measurements that does not add up, so a
+    bad number shows up on the bench instead of on the table."""
+    plate_near_y = PLATE_Y - PLATE_DEPTH_CM / 2.0
+    far_row_y = cell_xy(0, 0)[1]
+
+    # while the sensor is over the far row, where is the chassis?
+    front_edge = far_row_y - COLOUR_FWD_CM + ROBOT_LENGTH_CM / 2.0
+    if front_edge > plate_near_y:
+        print("WARNING: to read the far row the robot drives {:.1f} cm "
+              "onto the plate.".format(front_edge - plate_near_y))
+        print("         Either it must clear the tiles, or the colour "
+              "sensor needs to reach")
+        print("         {:.1f} cm ahead of the wheels (it is at {:.1f})."
+              .format(far_row_y - plate_near_y + ROBOT_LENGTH_CM / 2.0,
+                      COLOUR_FWD_CM))
+
+    # is there room to turn on the approach line without the grabber
+    # sweeping through the plate?
+    swing = max(GRAB_FWD_CM, COLOUR_FWD_CM) + 2.0
+    if plate_near_y - PLATE_APPROACH_Y < swing:
+        print("WARNING: PLATE_APPROACH_Y is only {:.1f} cm clear of the "
+              "plate; turning there needs {:.1f} cm."
+              .format(plate_near_y - PLATE_APPROACH_Y, swing))
+
+    if MAGAZINE_SIZE > 1 and RELEASE_MODE == "ALL_AT_ONCE":
+        print("NOTE: RELEASE_MODE dumps the whole magazine on the last "
+              "cell of each trip.")
+
+
 async def startup():
     say("INIT")
     print("robot {}x{}x{} cm, track {} cm, wheel {} cm, {} deg/cm".format(
@@ -987,6 +1139,7 @@ async def startup():
     print("mat {}x{} cm, start ({}, {}) heading {}".format(
         MAT_LENGTH_CM, MAT_WIDTH_CM, START_X, START_Y, START_H))
     print("api:", "SPIKE App 3" if NEW_API else "SPIKE App 2 (legacy)")
+    geometry_check()
     yaw_reset()
     await sleep_ms(400)                # let the gyro settle before moving
     set_pose(START_X, START_Y, START_H)
@@ -1013,30 +1166,41 @@ async def mission():
     else:
         pattern = FIXED_PATTERN
 
-    tasks = plan_tasks(pattern)
-    print("tasks:", tasks)
+    trips = plan_trips(pattern)
+    print("{} cells to fill in {} trip(s) of up to {}".format(
+        sum(len(c) for _, c in trips), len(trips), MAGAZINE_SIZE))
+    for colour, cells in trips:
+        print("   ", colour, cells)
 
     done = 0
+    cells_left = sum(len(c) for _, c in trips)
     trip_estimate = TRIP_ESTIMATE_S
-    for colour, row, col in tasks:
+    for trip_no, (colour, cells) in enumerate(trips):
         elapsed = ticks_diff(ticks_ms(), t_start) / 1000.0
         # do not start a trip we cannot finish - park instead
         if elapsed + trip_estimate > MISSION_TIMEOUT_S:
             say("TIME")
             print("stopping after {:.0f}s, {} cells left".format(
-                elapsed, len(tasks) - done))
+                elapsed, cells_left))
             break
-        t_task = ticks_ms()
-        if not await fetch(colour):
-            # nothing in the jaws - do not waste a trip to the plate
-            print("skipping", colour, row, col, "- no block picked up")
+
+        t_trip = ticks_ms()
+        got = await fetch(colour, len(cells))
+        if got == 0:
+            # empty jaws - do not waste a trip to the plate
+            print("skipping", colour, cells, "- depot gave nothing")
+            cells_left -= len(cells)
             continue
-        await deliver(colour, row, col)
-        done += 1
-        took = ticks_diff(ticks_ms(), t_task) / 1000.0
-        trip_estimate = took * 1.1            # learn the real trip cost
-        print("trip {} {} r{} c{} took {:.1f}s".format(
-            done, colour, row, col, took))
+        await deliver(colour, cells[:got])
+        done += got
+        cells_left -= got
+
+        took = ticks_diff(ticks_ms(), t_trip) / 1000.0
+        # scale the estimate to a full magazine so a short trip does not
+        # make the next one look cheaper than it is
+        trip_estimate = took * 1.1 * (MAGAZINE_SIZE / float(max(got, 1)))
+        print("trip {} - {} x {} took {:.1f}s".format(
+            trip_no + 1, got, colour, took))
 
     await go_home()
     drive_stop(False)
@@ -1109,7 +1273,8 @@ async def test_tools():
 async def test_scan():
     await startup()
     pattern = await scan_pattern()
-    print("tasks would be:", plan_tasks(pattern))
+    for colour, cells in plan_trips(pattern):
+        print("trip:", colour, cells)
     await go_home()
 
 
