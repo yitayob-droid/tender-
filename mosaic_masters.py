@@ -209,8 +209,15 @@ PLATE_X = 95.0
 # the mat turns out to be wider than MAT_WIDTH_CM says.
 PLATE_Y = MAT_WIDTH_CM - PLATE_FAR_EDGE_TO_MAT_CM - PLATE_DEPTH_CM / 2.0
 
-# Safe line the robot travels along when it moves around the plate.
-PLATE_APPROACH_Y = PLATE_Y - PLATE_ZONE_D_CM / 2.0 - 8.0
+# Turning on the spot sweeps the CORNERS of the chassis, not its nose,
+# so the radius that has to clear the plate is the half-diagonal of the
+# robot - bigger than any tool sticking out the front.
+CHASSIS_SWING_CM = math.sqrt((ROBOT_LENGTH_CM / 2.0) ** 2
+                             + (ROBOT_WIDTH_CM / 2.0) ** 2)
+
+# Safe line the robot travels along and turns on when working the plate.
+PLATE_APPROACH_Y = (PLATE_Y - PLATE_DEPTH_CM / 2.0
+                    - CHASSIS_SWING_CM - 2.0)
 PLATE_LEAVE_Y    = PLATE_APPROACH_Y
 
 # Depots.  "stand" is where the robot parks, "face" is the heading it
@@ -242,10 +249,13 @@ DEPOT_BLOCK_PITCH_CM = 6.0     # MEASURE: spacing of the blocks in a depot
 #                  between blocks ("row" gives the direction)
 DEPOT_LAYOUT = "IN_LINE"
 
-# Travel lanes: two horizontal corridors the robot uses so that it never
-# cuts across the plate or the depots.
-LANE_LOW_Y  = 30.0
-LANE_HIGH_Y = 92.0
+# Travel lanes: the two corridors the robot uses to get past the plate.
+# They sit exactly on the clear line either side of it, so arriving at
+# the plate from a lane costs no extra turn, and the high lane still
+# leaves the robot's width inside the mat.
+LANE_LOW_Y  = PLATE_APPROACH_Y
+LANE_HIGH_Y = min(PLATE_Y + PLATE_DEPTH_CM / 2.0 + CHASSIS_SWING_CM + 2.0,
+                  MAT_WIDTH_CM - ROBOT_WIDTH_CM / 2.0 - 2.0)
 
 # --- mission behaviour -----------------------------------------------
 # "SCAN"  : read the pattern off the plate at the start of the run
@@ -261,15 +271,20 @@ FIXED_PATTERN = [
 SKIP_COLOURS = ("black", "unknown", "red")
 
 # --- magazine --------------------------------------------------------
-# How many blocks the robot can carry in one trip.  With 3 the robot
-# makes one depot visit per three cells instead of one per cell, which
-# is roughly half the run time.
+# How many blocks the bay can physically hold.
 MAGAZINE_SIZE = 3
-# "ONE_AT_A_TIME" : the mechanism can let go of a single block, so each
-#                   block is placed on its own cell (what the scoring
-#                   almost certainly wants)
-# "ALL_AT_ONCE"   : everything is dumped at the last cell of the trip
-RELEASE_MODE = "ONE_AT_A_TIME"
+# How the mechanism lets go:
+#   "ONE_AT_A_TIME" a gate/ratchet frees a single block and holds the
+#                   rest, so one trip can serve several cells
+#   "ALL_AT_ONCE"   opening the grabber drops everything it is holding
+RELEASE_MODE = "ALL_AT_ONCE"
+
+# An all-or-nothing release cannot put three blocks on three different
+# cells - they would land in one pile - so a trip may only serve as many
+# cells as the robot can let go of separately.  The program works this
+# out rather than trusting MAGAZINE_SIZE, so a wrong setting can never
+# dump the whole bay onto one cell.
+CELLS_PER_TRIP = 1 if RELEASE_MODE == "ALL_AT_ONCE" else MAGAZINE_SIZE
 # Time budget.  Set this to your rulebook's run time minus about 10 s
 # so the robot always has time to park.  The mission also refuses to
 # start a trip it cannot finish inside the budget.
@@ -289,6 +304,19 @@ LIFT_DOWN_DEG    = 0     # jaws on the mat, ready to take a block
 LIFT_CARRY_DEG   = 95    # travelling height
 LIFT_UP_DEG      = 160   # fully raised, block tipped back into the bay
 LIFT_RELEASE_DEG = 10    # height the block is let go from
+# The chassis does not fit over the plate at normal ride height - the
+# up/down mechanism has to lift it clear before it drives on.  This is
+# the position that gives that clearance, and the robot goes to it
+# before every move that crosses the plate.
+LIFT_CLEAR_DEG   = 160
+PLATE_LIFT_CLEAR = True  # False if your robot can just drive over it
+# The colour sensor is bolted to the chassis at the front, on the
+# centreline, so lifting the robot clear of the plate lifts the sensor
+# away from the mat as well.  This is the compromise height used while
+# scanning: high enough to clear the tiles, low enough to still read a
+# colour.  If the readings go unreliable at this height, stop scanning
+# and set PATTERN_SOURCE = "FIXED" instead.
+SCAN_LIFT_DEG    = 120
 # Grabber position that frees exactly ONE block from the magazine while
 # the rest stay held.  On a build with no separate gate this is just
 # GRAB_OPEN_DEG.  Find it with MODE = "TEST_TOOLS".
@@ -865,6 +893,12 @@ def has_block():
 #  nothing else.
 # ---------------------------------------------------------------------
 
+async def lift_clear(position=None):
+    """Raise the robot clear of the plate before driving onto it."""
+    if PLATE_LIFT_CLEAR:
+        await lift_to(LIFT_CLEAR_DEG if position is None else position)
+
+
 async def collect_one(step_cm, face):
     """Drive step_cm onto the next block, close on it and tip it back
     into the magazine.  The robot stays where it is afterwards - the
@@ -901,9 +935,14 @@ async def release_one():
         await run_tool_to(PORT_GRAB, GRAB_RELEASE_ONE_DEG,
                           motor_sign=GRAB_SIGN)
     await sleep_ms(150)                    # let it settle onto the cell
+    # Raise BEFORE reversing.  Backing off while still low drags the
+    # chassis over the tiles that were just placed.
+    if PLATE_LIFT_CLEAR:
+        await lift_to(LIFT_CLEAR_DEG)
     await drive_straight(-5.0, SLOW_PCT, hold_heading=face)
     await grab_close()                     # hold what is left
-    await lift_to(LIFT_CARRY_DEG)
+    if not PLATE_LIFT_CLEAR:
+        await lift_to(LIFT_CARRY_DEG)
 
 
 # =====================================================================
@@ -927,6 +966,11 @@ async def scan_pattern():
     for _ in range(GRID_ROWS):
         pattern.append(["unknown"] * GRID_COLS)
 
+    # Stay at scanning height for the whole sweep.  The staging points
+    # are close enough to the plate that even turning there sweeps a
+    # chassis corner over it, so the robot must already be raised.
+    await lift_clear(SCAN_LIFT_DEG)
+
     for col in range(GRID_COLS):
         # line up below the column, sensor on the near-most cell
         near_row = GRID_ROWS - 1
@@ -943,10 +987,12 @@ async def scan_pattern():
             print("cell r{} c{} = {}  rgbi={} {} {} {}".format(
                 row, col, name, int(r), int(g), int(b), int(i)))
 
-        # reverse back out of the plate the way we came in
-        await drive_straight(-(CELL_PITCH_CM * (GRID_ROWS - 1) + 8.0),
-                             DRIVE_PCT)
+        # reverse back out to the clear line - far enough that turning
+        # away does not sweep a chassis corner over the plate
+        await drive_straight(PLATE_APPROACH_Y - POSE["y"], DRIVE_PCT,
+                             hold_heading=0.0)
 
+    await lift_to(LIFT_CARRY_DEG)          # back down once safely off
     print("pattern:", pattern)
     return pattern
 
@@ -980,12 +1026,12 @@ def plan_trips(pattern):
     for colour in ("yellow", "blue", "green", "white"):
         cells = by_colour.pop(colour, [])
         cells.sort()                       # row 0 (far side) first
-        for i in range(0, len(cells), MAGAZINE_SIZE):
-            trips.append((colour, cells[i:i + MAGAZINE_SIZE]))
+        for i in range(0, len(cells), CELLS_PER_TRIP):
+            trips.append((colour, cells[i:i + CELLS_PER_TRIP]))
     for colour, cells in by_colour.items():          # any other colour
         cells.sort()
-        for i in range(0, len(cells), MAGAZINE_SIZE):
-            trips.append((colour, cells[i:i + MAGAZINE_SIZE]))
+        for i in range(0, len(cells), CELLS_PER_TRIP):
+            trips.append((colour, cells[i:i + CELLS_PER_TRIP]))
     return trips
 
 
@@ -1004,17 +1050,46 @@ def lane_for(y):
     return LANE_LOW_Y if y < MAT_WIDTH_CM / 2.0 else LANE_HIGH_Y
 
 
+def in_plate_keepout(x, y):
+    """True if a robot centred here would have part of itself over the
+    plate.  The margin is the chassis swing, because the robot is 25 cm
+    wide - driving past broadside puts a lot more of it near the plate
+    than driving at it nose-first does."""
+    half_w = (CELL_PITCH_CM * (GRID_COLS - 1) / 2.0 + PLATE_BORDER_CM
+              + CHASSIS_SWING_CM)
+    half_h = PLATE_DEPTH_CM / 2.0 + CHASSIS_SWING_CM
+    return abs(x - PLATE_X) < half_w and abs(y - PLATE_Y) < half_h
+
+
 def path_to(x, y):
     """Waypoints from the current pose to (x, y) that keep clear of the
     mosaic plate by going around it through a travel lane."""
     sx, sy = POSE["x"], POSE["y"]
-    plate_zone_x = (PLATE_X - 25.0, PLATE_X + 25.0)
-    crossing = ((sx < plate_zone_x[0] and x > plate_zone_x[1])
-                or (sx > plate_zone_x[1] and x < plate_zone_x[0]))
-    if not crossing:
+
+    # walk the straight line and see whether any of it clips the plate
+    steps = 12
+    clips = False
+    for i in range(steps + 1):
+        t = i / float(steps)
+        if in_plate_keepout(sx + (x - sx) * t, sy + (y - sy) * t):
+            clips = True
+            break
+    if not clips:
         return [(x, y)]
+
+    # Go round by the corners of the keep-out box rather than dropping
+    # straight down to the lane, which costs one turn less.
     lane = lane_for((sy + y) / 2.0)
-    return [(sx, lane), (x, lane), (x, y)]
+    half_w = (CELL_PITCH_CM * (GRID_COLS - 1) / 2.0 + PLATE_BORDER_CM
+              + CHASSIS_SWING_CM)
+    left_edge, right_edge = PLATE_X - half_w, PLATE_X + half_w
+
+    points = [(left_edge if sx < PLATE_X else right_edge, lane)]
+    if (x < PLATE_X) != (sx < PLATE_X):
+        # target is on the far side, so run the length of the lane
+        points.append((left_edge if x < PLATE_X else right_edge, lane))
+    points.append((x, y))
+    return points
 
 
 async def fetch(colour, wanted):
@@ -1076,6 +1151,7 @@ async def deliver(colour, cells):
                                  hold_heading=0.0)
             await goto(stand_x, PLATE_APPROACH_Y, DRIVE_PCT,
                        final_heading=0.0)
+        await lift_clear()                 # chassis has to clear the tiles
         # cover most of the run-in at speed, only creep the last bit
         gap = stand_y - POSE["y"]
         if gap > 7.0:
@@ -1089,6 +1165,7 @@ async def deliver(colour, cells):
     # retreat to the travel lane before doing anything else
     await drive_straight(PLATE_LEAVE_Y - POSE["y"], DRIVE_PCT,
                          hold_heading=0.0)
+    await lift_to(LIFT_CARRY_DEG)          # back down once safely off
 
 
 async def go_home():
@@ -1110,25 +1187,41 @@ def geometry_check():
     # while the sensor is over the far row, where is the chassis?
     front_edge = far_row_y - COLOUR_FWD_CM + ROBOT_LENGTH_CM / 2.0
     if front_edge > plate_near_y:
-        print("WARNING: to read the far row the robot drives {:.1f} cm "
-              "onto the plate.".format(front_edge - plate_near_y))
-        print("         Either it must clear the tiles, or the colour "
-              "sensor needs to reach")
-        print("         {:.1f} cm ahead of the wheels (it is at {:.1f})."
-              .format(far_row_y - plate_near_y + ROBOT_LENGTH_CM / 2.0,
-                      COLOUR_FWD_CM))
+        overlap = front_edge - plate_near_y
+        if PLATE_LIFT_CLEAR:
+            print("NOTE: the robot rides {:.1f} cm onto the plate to reach "
+                  "the far row,".format(overlap))
+            print("      so LIFT_CLEAR_DEG ({}) must give real clearance "
+                  "over the tiles.".format(LIFT_CLEAR_DEG))
+        else:
+            print("WARNING: the robot drives {:.1f} cm onto the plate and "
+                  "PLATE_LIFT_CLEAR is off.".format(overlap))
+            print("         Either lift it clear, or the colour sensor "
+                  "needs to reach")
+            print("         {:.1f} cm ahead of the wheels (it is at {:.1f})."
+                  .format(far_row_y - plate_near_y + ROBOT_LENGTH_CM / 2.0,
+                          COLOUR_FWD_CM))
 
-    # is there room to turn on the approach line without the grabber
-    # sweeping through the plate?
-    swing = max(GRAB_FWD_CM, COLOUR_FWD_CM) + 2.0
+    # is there room to turn on the approach line without a corner of
+    # the chassis sweeping through the plate?
+    swing = max(CHASSIS_SWING_CM, GRAB_FWD_CM, COLOUR_FWD_CM) + 2.0
     if plate_near_y - PLATE_APPROACH_Y < swing:
         print("WARNING: PLATE_APPROACH_Y is only {:.1f} cm clear of the "
-              "plate; turning there needs {:.1f} cm."
-              .format(plate_near_y - PLATE_APPROACH_Y, swing))
+              "plate; turning".format(plate_near_y - PLATE_APPROACH_Y))
+        print("         there sweeps the chassis corners {:.1f} cm."
+              .format(swing))
 
-    if MAGAZINE_SIZE > 1 and RELEASE_MODE == "ALL_AT_ONCE":
-        print("NOTE: RELEASE_MODE dumps the whole magazine on the last "
-              "cell of each trip.")
+    if PLATE_LIFT_CLEAR:
+        print("NOTE: scanning happens at lift {} deg, so calibrate the "
+              "colours".format(SCAN_LIFT_DEG))
+        print("      at that height, not with the robot sitting down.")
+
+    if RELEASE_MODE == "ALL_AT_ONCE" and MAGAZINE_SIZE > 1:
+        print("NOTE: the grabber releases everything at once, so a trip "
+              "serves 1 cell,")
+        print("      not {}.  Fitting a gate that frees one block at a "
+              "time is worth".format(MAGAZINE_SIZE))
+        print("      roughly double the cells in the same run time.")
 
 
 async def startup():
@@ -1167,8 +1260,8 @@ async def mission():
         pattern = FIXED_PATTERN
 
     trips = plan_trips(pattern)
-    print("{} cells to fill in {} trip(s) of up to {}".format(
-        sum(len(c) for _, c in trips), len(trips), MAGAZINE_SIZE))
+    print("{} cells to fill in {} trip(s) of up to {} cell(s)".format(
+        sum(len(c) for _, c in trips), len(trips), CELLS_PER_TRIP))
     for colour, cells in trips:
         print("   ", colour, cells)
 
@@ -1198,7 +1291,7 @@ async def mission():
         took = ticks_diff(ticks_ms(), t_trip) / 1000.0
         # scale the estimate to a full magazine so a short trip does not
         # make the next one look cheaper than it is
-        trip_estimate = took * 1.1 * (MAGAZINE_SIZE / float(max(got, 1)))
+        trip_estimate = took * 1.1 * (CELLS_PER_TRIP / float(max(got, 1)))
         print("trip {} - {} x {} took {:.1f}s".format(
             trip_no + 1, got, colour, took))
 

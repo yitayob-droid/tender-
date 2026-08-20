@@ -17,10 +17,10 @@ tools/simulator.py    desktop simulator, runs the program without the robot
 2. Homes the grabber and the lift against their end stops so both know where zero is.
 3. Drives to the black plate in the middle and reads all 12 cells (4 across, 3 deep)
    with the colour sensor, one column at a time.
-4. Groups the cells by colour into **trips of up to 3 blocks**, matching the
-   magazine. Each trip: drive to that colour's depot, sweep up to three blocks in one
-   pass, **check each block is actually in the jaws**, carry them to the plate and
-   place them one per cell.
+4. Groups the cells by colour into trips. Each trip: drive to that colour's depot,
+   sweep up blocks in one pass, **check each block is actually in the jaws**, carry
+   them to the plate and place them. The robot raises itself on the lift before it
+   drives onto the plate, and stays raised until it is clear again.
 5. Stops collecting when the time budget will not fit another trip, and parks back in
    the start area.
 
@@ -120,50 +120,72 @@ spot and fix.
 
 ---
 
-## 5. What the measurements settled, and what is still open
+## 5. What is settled, and what is still open
 
 Your AR tape measurements went in as:
 
 | Measured | Used as |
 |---|---|
 | 37 cm, plate's far edge → mat edge on the "resolute." side | `PLATE_FAR_EDGE_TO_MAT_CM`, which `PLATE_Y` is derived from |
-| grey square around the plate = 31 × 26 cm | `PLATE_ZONE_W_CM` / `PLATE_ZONE_D_CM`, used for the approach line |
+| grey square around the plate = 31 × 26 cm | `PLATE_ZONE_W_CM` / `PLATE_ZONE_D_CM` |
 | grid is 4 across × 3 deep, colours yellow/blue/green/white | `GRID_COLS` / `GRID_ROWS`, and it confirms the depot colours |
+| colour sensor at the front, on the centreline | `COLOUR_SIDE_CM = 0` |
 
 `PLATE_Y` is worked out **from the far edge inwards**, so it stays right even if the
 mat turns out to be a different width than `MAT_WIDTH_CM` says.
 
-Still open, in the order they cost you points:
+### The release is the thing costing you the most
 
-1. **Can the robot drive over the plate?** To read the far row, the colour sensor has
-   to be 20.5 cm ahead of the wheels; yours is at about 8, so the chassis ends up
-   roughly 12 cm onto the plate. The program prints this warning at startup with your
-   real numbers. If the tiles stand proud and the robot cannot clear them, the fix is
-   either a longer sensor arm or `PATTERN_SOURCE = "FIXED"`. This also decides whether
-   a much faster delivery is available — see the note at the end.
-2. **Cell pitch.** `CELL_PITCH_CM = 5.0` is a guess from the photos. Measure centre to
+You said the grabber lets go of everything at once. That means a trip can only serve
+**one** cell — three blocks released together land in a pile, not on three cells. The
+program works this out itself (`CELLS_PER_TRIP`) rather than trusting `MAGAZINE_SIZE`,
+so a wrong setting can never dump the bay onto one cell, and it says so at startup.
+
+A round trip is about 26 s. Twelve cells is therefore out of reach in a 2-minute run
+however the rest is tuned. **Fitting a gate, ratchet, or pusher that frees one block
+while the bay holds the rest is worth roughly double the cells in the same run time**,
+and the three-block path is already written and tested — set
+`RELEASE_MODE = "ONE_AT_A_TIME"`, find the grabber angle with `TEST_TOOLS`, put it in
+`GRAB_RELEASE_ONE_DEG`, and the planner switches over on its own.
+
+Second-biggest: `PATTERN_SOURCE = "FIXED"` skips the 33 s scan if the rules let you
+read the pattern before the run.
+
+### Lifting clear of the plate
+
+Because the chassis has to be raised to cross the plate, the robot goes to
+`LIFT_CLEAR_DEG` before every move onto it and only comes down to place a block —
+and it raises again *before* reversing off, so it never drags over what it just
+placed. The simulator checks this and reports any tick where the chassis was over the
+plate un-raised while moving.
+
+The catch: the colour sensor is bolted to the chassis, so raising the robot raises the
+sensor away from the mat. Scanning therefore happens at `SCAN_LIFT_DEG` (a compromise
+height), and **you must calibrate the colours at that height**, not with the robot
+sitting down. If the readings are unreliable up there, use `PATTERN_SOURCE = "FIXED"`.
+
+Turning is what really sets the safe distance: the robot's **corners** sweep 15.4 cm
+(the half-diagonal of an 18 × 25 cm chassis), which is further than any tool on the
+front. `PLATE_APPROACH_Y` and both travel lanes are derived from that, and `path_to()`
+routes around a keep-out box so the robot never passes the plate broadside either.
+
+### Still to measure
+
+1. **Cell pitch.** `CELL_PITCH_CM = 5.0` is a guess from the photos. Measure centre to
    centre between two neighbouring cells; it sets every placement position.
-3. **`PLATE_X`.** Not pinned down by any of the three measurements. Measure from one
-   short end of the mat to the middle of the plate.
-4. **Mat size.** Your 1.15 m diagonal is longer than a 200 × 100 cm mat and the plate
-   position allow, which suggests the printed mat is the official 2362 × 1143 mm
-   rather than 2 × 1 m. Confirm it and set `MAT_LENGTH_CM` / `MAT_WIDTH_CM`.
-5. **Depot layout.** `DEPOT_BLOCK_PITCH_CM = 6.0` and `DEPOT_LAYOUT = "IN_LINE"`
-   assume the blocks of one colour sit one behind the other so the robot sweeps them
-   up in a single forward pass. If they are spread across its path instead, set
-   `DEPOT_LAYOUT = "SIDE_BY_SIDE"` — it works, it is just slower.
-6. **What "matching" means.** I assumed: read each cell's colour, deliver a block of
-   that colour to that cell. If the plate is really a *template* and the mosaic gets
-   built somewhere else, change `cell_xy()` to return the build area coordinates and
-   nothing else moves.
+2. **`PLATE_X`.** Not pinned down by any measurement. Measure from one short end of the
+   mat to the middle of the plate.
+3. **Mat size.** Your 1.15 m diagonal is longer than a 200 × 100 cm mat and the plate
+   position allow, which suggests the printed mat is the official 2362 × 1143 mm.
+   Confirm it and set `MAT_LENGTH_CM` / `MAT_WIDTH_CM`.
+4. **Depot layout.** `DEPOT_BLOCK_PITCH_CM = 6.0` and `DEPOT_LAYOUT = "IN_LINE"` assume
+   the blocks of one colour sit one behind the other. If they are spread across the
+   robot's path, set `DEPOT_LAYOUT = "SIDE_BY_SIDE"`.
+5. **What "matching" means.** I assumed: read each cell's colour, deliver a block of
+   that colour to that cell. If the plate is a *template* and the mosaic gets built
+   elsewhere, change `cell_xy()` and nothing else moves.
 
-**The speed note.** If the robot *can* drive over the plate, a much faster delivery
-opens up: turn along the row instead of facing it, and serve a whole row right to
-left with a 5 cm reverse between cells and no turns at all — about 1 s per cell
-instead of about 6. Right now the robot backs out to a safe line and turns twice
-between cells, because turning any closer would sweep the grabber through the plate.
-
-## 6. Tuning cheat sheet
+**One colour sensor**## 6. Tuning cheat sheet
 
 | Symptom | Fix |
 |---|---|
@@ -177,6 +199,8 @@ between cells, because turning any closer would sweep the grabber through the pl
 | Runs out of time | `PATTERN_SOURCE = "FIXED"` saves ~30 s, raise `DRIVE_PCT`, set `MISSION_TIMEOUT_S` to your rulebook time minus 10 s |
 | Only picks 1–2 blocks per trip | `DEPOT_BLOCK_PITCH_CM` is wrong, or the depot is `SIDE_BY_SIDE` not `IN_LINE` |
 | Whole magazine falls out at once | `GRAB_RELEASE_ONE_DEG` is too far open — find it with `TEST_TOOLS` |
+| Chassis scrapes the tiles | raise `LIFT_CLEAR_DEG`; the simulator reports every drag |
+| Colours misread while scanning | recalibrate at `SCAN_LIFT_DEG` height, or lower it |
 
 Positions and timings print to the console during a run, so if something goes wrong
 on the table, the console tells you which trip and which phase it was in.
@@ -197,10 +221,12 @@ python3 tools/simulator.py MISSION --legacy      # via the SPIKE App 2 path
 ```
 
 It reports the true pose, the pose the robot *believed* it had (odometry error) and
-where every block was released. Current result: the scan recovers all 12 cells
-exactly, a 3-block trip takes about 42 s, and every block lands within 0.5 cm of its
-cell centre. With the scan included and a 110 s budget that is one full trip; drop
-the scan with `PATTERN_SOURCE = "FIXED"` and it is two. The model is deliberately
+where every block was released. It also counts every tick the chassis was over the plate without being raised, which
+is how the drag-on-reverse bug and the corner-clipping approach line were both found.
+
+Current result: the scan recovers all 12 cells exactly, a one-block trip takes about
+26 s, blocks land within 0.5 cm of their cell centres, and there are no plate drags —
+on both the App 3 and App 2 code paths. The model is deliberately
 imperfect — the right wheel runs 1 % slow — so the gyro controller has something to
 correct. It cannot tell you anything about grip, weight or friction; that is what the
 table is for.

@@ -54,6 +54,7 @@ class World:
         self._roles_done = False
         self._closed_flag = False
         self._prev_gpos = 0.0
+        self.drags = 0          # times the chassis crossed the plate low
 
         # ground truth mosaic used by the fake colour sensor
         # ground truth read off the mat photos: 4 across, 3 deep
@@ -90,6 +91,7 @@ class World:
 
         self._apply_roles()
         self._update_blocks()
+        self._check_plate_drag()
         for letter, m in self.motors.items():
             vel = m["cmd"]
             pos = m["pos"] + vel * dt
@@ -178,6 +180,42 @@ class World:
             bx, by = self.sensor_xy(g["GRAB_FWD_CM"], g["GRAB_SIDE_CM"])
             self.placed.append((round(bx, 1), round(by, 1)))
         self._prev_gpos = gpos
+
+    def _check_plate_drag(self):
+        """Count the ticks where the chassis is over the plate without
+        the lift raised - that is the robot grinding over the tiles."""
+        prog = self.prog()
+        if prog is None or not hasattr(prog, "PLATE_X"):
+            return
+        g = prog.__dict__
+        if not g.get("PLATE_LIFT_CLEAR", False):
+            return
+        _, _, lift, _ = self.ports()
+
+        # axis-aligned box around the robot at its current heading
+        r = math.radians(self.h)
+        half_l, half_w = g["ROBOT_LENGTH_CM"] / 2.0, g["ROBOT_WIDTH_CM"] / 2.0
+        ex = abs(math.sin(r)) * half_l + abs(math.cos(r)) * half_w
+        ey = abs(math.cos(r)) * half_l + abs(math.sin(r)) * half_w
+
+        plate_hw = (g["CELL_PITCH_CM"] * (g["GRID_COLS"] - 1) / 2.0
+                    + g["PLATE_BORDER_CM"])
+        plate_hh = g["PLATE_DEPTH_CM"] / 2.0
+        overlaps = (abs(self.x - g["PLATE_X"]) < ex + plate_hw
+                    and abs(self.y - g["PLATE_Y"]) < ey + plate_hh)
+        if not overlaps:
+            return
+
+        # Only moving counts.  Setting the robot down on the plate while
+        # it is stationary is how a block gets placed; dragging it over
+        # the tiles while low is the failure worth catching.
+        left, right, _, _ = self.ports()
+        speed = abs(self.motors[left]["vel"]) + abs(self.motors[right]["vel"])
+        if speed * CM_PER_DEG < 0.5:
+            return
+        needed = min(g.get("SCAN_LIFT_DEG", 999), g.get("LIFT_CLEAR_DEG", 999))
+        if self.motors[lift]["pos"] < needed - 15.0:
+            self.drags += 1
 
     # -- sensors ------------------------------------------------------
     def yaw_decideg(self):
@@ -433,6 +471,12 @@ def main():
     err = math.hypot(WORLD.x - module.POSE["x"], WORLD.y - module.POSE["y"])
     print("odometry error: %.2f cm" % err)
     print("blocks released: %d at %s" % (len(WORLD.placed), WORLD.placed))
+    if WORLD.drags:
+        print("PLATE DRAG    : chassis was over the plate un-raised on "
+              "%d ticks" % WORLD.drags)
+    else:
+        print("plate drag    : none - lift was raised every time the "
+              "chassis crossed the plate")
     if VERBOSE:
         for row in WORLD.trace:
             print("   t=%5.1f  x=%6.1f  y=%6.1f  h=%6.1f" % row)
