@@ -97,6 +97,8 @@ MOSAIC = (74, 81.1)                    # to a spot STANDOFF cm in front of
                                        # the NEAREST cell of the LEFTMOST
                                        # column
 PICK_CM = 9.0                          # nose-in to close on the lined-up 3
+PUSH_STANDOFF = 3.0                    # the pusher parks this far behind a
+                                       # block before shoving it
 
 # Colour references: normalised r, g, b. Set MODE = "COLOURS", hold the
 # sensor over each block, paste the printed triples in.
@@ -107,6 +109,17 @@ COLOURS = {
     "blue":   (0.16, 0.30, 0.54),
 }
 DARK = 90                              # below this intensity it is black
+
+# The pattern on the mat, read off by eye. Row 0 is the one nearest the
+# green part of the map. Used when PATTERN_SOURCE is "FIXED", and worth
+# keeping up to date as a check on what the scan reads.
+FIXED_PATTERN = [
+    ["yellow", "yellow", "yellow"],
+    ["white",  "blue",   "white"],
+    ["white",  "blue",   "white"],
+    ["green",  "white",  "green"],
+]
+PATTERN_SOURCE = "SCAN"                # SCAN | FIXED
 
 MODE = "RUN"                           # RUN | COLOURS | TEST
 
@@ -130,19 +143,32 @@ def error_to(heading):
     return (heading - yaw() + 180) % 360 - 180
 
 
-async def turn_to(heading):
-    """Spin on the spot to a gyro heading."""
+async def turn_to(heading, tol=0.5):
+    """Spin on the spot to a gyro heading.
+
+    The tolerance is tight on purpose. Every leg of this program starts
+    with a turn, and at 1.5 degrees the leftover error piles up into
+    something like 20 cm of drift across a run. It has to settle inside
+    the band rather than just touch it, or the robot hunts."""
+    settled = 0
     while True:
         e = error_to(heading)
-        if abs(e) < 1.5:
-            break
+        if abs(e) < tol:
+            stop()
+            settled += 1
+            if settled >= 5:                       # 50 ms inside the band
+                break
+            await runloop.sleep_ms(10)
+            continue
+        settled = 0
         p = max(min(e * 6, SPIN), -SPIN)
-        if abs(p) < 90:
-            p = 90 if p > 0 else -90
+        floor = 60 if abs(e) < 5 else 90           # creep when close
+        if abs(p) < floor:
+            p = floor if p > 0 else -floor
         wheels(p, -p)
         await runloop.sleep_ms(10)
     stop()
-    await runloop.sleep_ms(80)
+    await runloop.sleep_ms(60)
 
 
 async def drive(cm, speed=FAST, heading=None):
@@ -411,23 +437,28 @@ async def push_block(colour, n, slot_x):
 
     # line up behind the block with the pusher held clear
     await carriage(CARRIAGE_UP)
-    await depot_goto(bx, by + PITCH)
+    await depot_goto(bx, by + PUSH_STANDOFF)       # pusher just behind it
     await turn_to(DEPOT_OUT)
 
-    # push stroke: down, drive, back up
+    # push stroke: down, drive, back up. The robot travels exactly as far
+    # as the block does, so it ends one standoff short of the lane.
     await carriage(CARRIAGE_DOWN)
-    await drive(by + PITCH - LANE_Y, SLOW, DEPOT_OUT)
-    AT[1] = LANE_Y
+    await drive(by - LANE_Y, SLOW, DEPOT_OUT)
+    AT[1] = LANE_Y + PUSH_STANDOFF
     await carriage(CARRIAGE_UP)
 
     # then along the lane into its slot, if it is not already there
     if abs(slot_x - bx) > 0.3:
-        side = DEPOT_AXIS if slot_x > bx else DEPOT_AXIS + 180
-        await depot_goto(bx - (slot_x - bx), LANE_Y)   # line up behind it
+        way = 1 if slot_x > bx else -1
+        side = DEPOT_AXIS if way > 0 else DEPOT_AXIS + 180
+        # Line up one standoff behind the block. The robot then travels
+        # the same distance the block does, so it finishes one standoff
+        # short of the slot - NOT at the slot.
+        await depot_goto(bx - way * PUSH_STANDOFF, LANE_Y + PUSH_STANDOFF)
         await turn_to(side)
         await carriage(CARRIAGE_DOWN)
         await drive(abs(slot_x - bx), SLOW, side)
-        AT[0] = slot_x
+        AT[0] = slot_x - way * PUSH_STANDOFF
         await carriage(CARRIAGE_UP)
 
     STOCK[colour][n] = False
@@ -451,7 +482,10 @@ async def collect_and_place(row, colours):
 
     # Scoop all three at once. order_pushes() puts the middle slot first,
     # so plan[0] is where the centre pocket has to end up.
-    await depot_goto(plan[0][2], LANE_Y - PICK_CM)
+    # stand PICK_CM back on the depot side of the lane, then drive onto
+    # it. Standing on the far side and driving out again put the robot
+    # two pick-lengths past the lane and lost the depot origin.
+    await depot_goto(plan[0][2], LANE_Y + PICK_CM)
     await turn_to(DEPOT_OUT)
     await carriage(CARRIAGE_DOWN)
     await jaws(JAWS_OPEN)
@@ -485,7 +519,15 @@ async def run():
 
     if not await find_line():                      # 1
         print("running off the start position instead of a line junction")
-    pattern = await scan_mosaic()                  # 2
+    if PATTERN_SOURCE == "FIXED":                  # 2
+        pattern = FIXED_PATTERN
+        print("using the pattern typed into FIXED_PATTERN")
+    else:
+        pattern = await scan_mosaic()
+        for r in range(ROWS):
+            if pattern[r] != FIXED_PATTERN[r]:
+                print("row", r, "scanned", pattern[r],
+                      "but FIXED_PATTERN says", FIXED_PATTERN[r])
     for row in range(ROWS - 1, -1, -1):            # 3, repeated -> 4
         await collect_and_place(row, pattern[row])
 

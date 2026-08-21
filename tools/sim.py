@@ -219,8 +219,11 @@ def install(start):
     sys.modules["hub"] = hub
 
 
-PATTERN = [["blue", "yellow", "green"], ["yellow", "blue", "white"],
-           ["green", "yellow", "blue"], ["yellow", "green", "yellow"]]
+# the real pattern, as read off the mat by the team
+PATTERN = [["yellow", "yellow", "yellow"],
+           ["white", "blue", "white"],
+           ["white", "blue", "white"],
+           ["green", "white", "green"]]
 RGB = {"blue": (110, 200, 360, 260), "yellow": (470, 410, 140, 500),
        "green": (150, 420, 190, 300), "white": (330, 330, 310, 640),
        "black": (25, 26, 25, 40)}
