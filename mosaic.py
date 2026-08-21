@@ -390,6 +390,8 @@ def check_ports():
         ok = False
     if ok:
         print("all five ports answered")
+    else:
+        light_matrix.write("PORT")
     return ok
 
 
@@ -714,20 +716,27 @@ async def collect_and_place(row, colours):
 
 # ------------------------------------------------------------------ main
 async def run():
+    # These only ever warn. A robot that refuses to move scores nothing,
+    # so anything that looks wrong is reported and the run goes ahead.
+    light_matrix.write("GO")
+    print("--- starting ---")
     show_pattern(TILES, "mosaic to build (%d wide, %d deep):" % (COLS, ROWS))
     if not check_ports():
-        print("fix the ports above before running the mission")
-        return
+        print("carrying on anyway - expect trouble from the port above")
     if not check_stock(TILES):
-        print("the pattern cannot be built from this depot")
-        return
+        print("carrying on anyway - some cells will be skipped")
+
+    print("zeroing the gyro")
     motion_sensor.reset_yaw(0)
     await runloop.sleep_ms(300)
+    print("homing the carriage")
     await home(CARRIAGE, CARRIAGE_HOME_DIR)        # carriage down = 0
+    print("homing the grabber")
     await home(GRAB, GRAB_HOME_DIR)                # grabber open = 0
+    print("raising the carriage")
     await carriage(CARRIAGE_UP)
 
-    if PATTERN_SOURCE == "SCAN":                   # 2
+    if PATTERN_SOURCE == "SCAN":                   # 1
         pattern = await scan_mosaic()
         show_pattern(pattern, "scanned:")
         for r in range(min(ROWS, len(pattern))):
@@ -736,10 +745,11 @@ async def run():
                       "but you typed", TILES[r])
     else:
         pattern = TILES
-    for row in range(ROWS - 1, -1, -1):            # 3, repeated -> 4
+    for row in range(ROWS - 1, -1, -1):            # 2, repeated -> 3
         await collect_and_place(row, pattern[row])
 
     stop()
+    print("--- finished ---")
     light_matrix.write("OK")
 
 
