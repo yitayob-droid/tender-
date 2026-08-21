@@ -60,6 +60,27 @@ def parse_pattern(text):
     return grid
 
 
+def check_stock(grid):
+    """Count what the pattern asks for against the six blocks of each
+    colour in the depot, before the robot drives anywhere."""
+    need = {}
+    for row in grid:
+        for c in row:
+            if c:
+                need[c] = need.get(c, 0) + 1
+    ok = True
+    for colour, n in need.items():
+        if colour not in GROUPS:
+            print("no depot holds", colour)
+            ok = False
+        elif n > len(LAYOUT):
+            print("pattern needs", n, colour, "but the depot only has",
+                  len(LAYOUT))
+            ok = False
+    print("needs", need)
+    return ok
+
+
 def show_pattern(grid, title):
     print(title)
     back = {v: k for k, v in LETTERS.items() if v}
@@ -169,6 +190,9 @@ COLOURS = {
     "blue":   (0.16, 0.30, 0.54),
 }
 DARK = 90                              # below this intensity it is black
+COLOUR_MAX_DIST = 0.22                 # further than this from every
+                                       # reference and it admits it does
+                                       # not know, instead of guessing
 
 # "TYPED" trusts the letter grid at the top of the file and skips the
 # scan, which saves about 30 seconds. "SCAN" reads the mat and prints any
@@ -179,6 +203,8 @@ PATTERN_SOURCE = "SCAN"                # SCAN | TYPED
 # MOVE     turn each motor on in turn - use this first if nothing moves
 # TEST     drive, turn, home, and cycle both tools
 # COLOURS  print what the colour sensor sees
+# MOSAIC   drive to the mosaic, scan it, come back. Nothing is touched.
+# DEPOT    drive to the depot and back. Nothing is touched.
 MODE = "RUN"
 
 
@@ -312,6 +338,8 @@ def read_colour():
         d = (abs(r / t - ref[0]) + abs(g / t - ref[1]) + abs(b / t - ref[2]))
         if d < best_d:
             best, best_d = name, d
+    if best_d > COLOUR_MAX_DIST:
+        return "?"
     return best
 
 
@@ -345,7 +373,10 @@ async def run_tool(m, target, name, tol=6, timeout_ms=3000):
         if abs(p) < 120:
             p = 120 if p > 0 else -120
         motor.run(m, int(p))
-        if abs(motor.velocity(m)) < 20:
+        # only start watching for a stall once it has had time to get
+        # going, or the reading taken right after motor.run() is always
+        # zero and every move reports a jam
+        if t > 300 and abs(motor.velocity(m)) < 20:
             slow += 20
             if slow > 400:                          # jammed on something
                 print(name, "stalled at", motor.relative_position(m),
@@ -666,6 +697,9 @@ async def run():
     if not check_ports():
         print("fix the ports above before running the mission")
         return
+    if not check_stock(TILES):
+        print("the pattern cannot be built from this depot")
+        return
     motion_sensor.reset_yaw(0)
     await runloop.sleep_ms(300)
     await home(CARRIAGE, CARRIAGE_HOME_DIR)        # carriage down = 0
@@ -716,6 +750,31 @@ async def test():
     await jaws(JAWS_OPEN)
 
 
+async def only_mosaic():
+    """Drive out to the mosaic, read it, come home. Checks MOSAIC,
+    STANDOFF, CELL and the colour references without moving a block."""
+    check_ports()
+    motion_sensor.reset_yaw(0)
+    await runloop.sleep_ms(300)
+    await home(CARRIAGE, CARRIAGE_HOME_DIR)
+    await carriage(CARRIAGE_UP)
+    pattern = await scan_mosaic()
+    show_pattern(pattern, "scanned:")
+    show_pattern(TILES, "you typed:")
+
+
+async def only_depot():
+    """Drive to the depot corner and straight back. Checks DEPOT."""
+    check_ports()
+    motion_sensor.reset_yaw(0)
+    await runloop.sleep_ms(300)
+    await go(DEPOT)
+    print("this should be the near corner of the depot")
+    await runloop.sleep_ms(2000)
+    await go_back(DEPOT)
+    print("and this should be where you started")
+
+
 async def main():
     try:
         if MODE == "COLOURS":
@@ -724,6 +783,10 @@ async def main():
             await move_test()
         elif MODE == "TEST":
             await test()
+        elif MODE == "MOSAIC":
+            await only_mosaic()
+        elif MODE == "DEPOT":
+            await only_depot()
         else:
             await run()
     except Exception as e:
