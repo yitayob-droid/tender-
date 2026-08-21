@@ -38,16 +38,27 @@ HOME_SPEED = 200
 # ---- mosaic: 3 wide, 4 deep. A row is 3 blocks = exactly one grabber load
 COLS, ROWS = 3, 4
 CELL = 5.0                             # cm between cell centres, MEASURE
-FIRST_CELL = 8.0                       # cm from the line to the first cell
-COL_STEP = 5.0                         # cm sideways between columns
+COL_STEP = CELL                        # columns are one cell apart
+STANDOFF = 12.0                        # cm from where MOSAIC parks you to
+                                       # the centre of the nearest row
+
+# How far ahead of the wheels each tool sits. The sensor is out on the
+# front; the pockets are underneath, near the middle.
+SENSOR_FWD = 8.0
+POCKET_FWD = 0.0
 
 # ---- depot geometry -------------------------------------------------
 # One LEGO block is 31.8 mm. Blocks of the same colour sit one block
 # apart, so centre to centre is two blocks. The colour groups sit two
 # blocks apart, so group to group is three blocks.
 BLOCK = 3.18                           # cm, one block
-PITCH = BLOCK * 2                      # 6.36 cm between same-colour blocks
-GROUP_GAP = BLOCK * 3                  # 9.54 cm between colour groups
+# "One block away" is one step on the block grid, so same-colour blocks
+# sit 3.18 cm centre to centre and the groups two steps beyond that.
+# Checked against the mat photo: this puts the four groups 12.7 cm apart
+# and they measure 12.4 cm, which the old reading missed by nearly two to
+# one.
+PITCH = BLOCK                          # 3.18 cm between same-colour blocks
+GROUP_GAP = BLOCK * 2                  # 6.36 cm between colour groups
 
 # Where the 6 blocks of one colour sit, as (column, row) in units of
 # PITCH. Row 0 is the row nearest the robot. This is the staggered
@@ -57,8 +68,12 @@ LAYOUT = [(0, 0), (1, 0), (2, 0),
 GROUP_WIDTH = 2 * PITCH                # widest column offset in a group
 GROUP_SPAN = GROUP_WIDTH + GROUP_GAP   # start of one group to the next
 
-# Order of the colour groups along the depot, left to right
+# Order of the colour groups along the depot, and the heading you travel
+# to go from the first to the last. On this mat the groups run UP the
+# left edge, not across it, which is what DEPOT_AXIS captures.
 GROUPS = ["yellow", "blue", "green", "white"]
+DEPOT_AXIS = 14                        # +x of the depot frame
+DEPOT_OUT = DEPOT_AXIS + 90            # the way blocks get pushed onto the lane
 
 # The staging lane: a clear line in front of the depot where the three
 # blocks get lined up before they are scooped.
@@ -74,8 +89,13 @@ SLOT_PITCH = BLOCK + BRICK_SHORT       # 4.77 cm between staging slots
 # Each place on the mat is (heading, distance) from the junction the
 # robot ends up on after finding the line. MEASURE THESE.
 HOME = 0                               # heading of the line it works from
-DEPOT = (270, 20.0)                    # to the near corner of the depot
-MOSAIC = (0, 30.0)                     # to the near edge of the mosaic
+# Bearings and distances measured off the overhead photo of the mat,
+# from the ROBOMISSION corner where the robot starts. Re-measure once
+# find_line() settles on its junction, because these move with it.
+DEPOT = (345, 25.7)                    # to the near corner of the depot
+MOSAIC = (74, 81.1)                    # to a spot STANDOFF cm in front of
+                                       # the NEAREST cell of the LEFTMOST
+                                       # column
 PICK_CM = 9.0                          # nose-in to close on the lined-up 3
 
 # Colour references: normalised r, g, b. Set MODE = "COLOURS", hold the
@@ -156,14 +176,22 @@ async def follow_line(cm, speed=SLOW):
 
 
 async def find_line(max_cm=60.0, speed=SLOW):
-    """STEP 1. Creep forward until the sensor is over the black line."""
+    """STEP 1. Creep forward until the sensor is over the black line.
+
+    If there is no line within reach, back up to where the search
+    started. Every position in this program is measured from that spot,
+    so leaving the robot 60 cm up the mat would throw off everything
+    after it."""
     light_matrix.write("1")
     motor.reset_relative_position(LEFT, 0)
     goal = max_cm / WHEEL_CM * 360.0
     while color_sensor.reflection(EYE) > BLACK + 10:
         if abs(motor.relative_position(LEFT)) > goal:
             stop()
-            print("no line found")
+            gone = abs(motor.relative_position(LEFT)) / 360.0 * WHEEL_CM
+            print("no line within %.0f cm - backing up %.0f cm to the start"
+                  % (max_cm, gone))
+            await drive(-gone, SLOW)
             return False
         wheels(speed, speed)
         await runloop.sleep_ms(10)
@@ -215,19 +243,21 @@ async def scan_mosaic():
     light_matrix.write("2")
     pattern = [["?"] * COLS for _ in range(ROWS)]
     await go(MOSAIC)
-    lane = MOSAIC[0]                               # heading down the columns
+    await turn_to(HOME)                            # square up to the grid
+    lane = HOME                                    # heading down the columns
+    first = STANDOFF - SENSOR_FWD                  # sensor onto the near row
 
     for col in range(COLS):
         if col:
             await turn_to(lane + 90)               # shift one column right
             await drive(COL_STEP, SLOW)
             await turn_to(lane)
-        await drive(FIRST_CELL, SLOW, lane)
+        await drive(first, SLOW, lane)
         for row in range(ROWS):
             if row:
                 await drive(CELL, SLOW, lane)
             pattern[row][col] = read_colour()
-        await drive(-(FIRST_CELL + CELL * (ROWS - 1)), FAST, lane)
+        await drive(-(first + CELL * (ROWS - 1)), FAST, lane)
 
     await turn_to(lane + 270)                      # back to the first column
     await drive(COL_STEP * (COLS - 1), SLOW)
@@ -301,17 +331,24 @@ def plan_row(colours):
     Done in two passes: guess a spot from the colour groups, pick the
     real blocks nearest their slots, then re-centre on the blocks we
     actually chose."""
+    # a cell the sensor could not read is skipped rather than crashing
+    colours = [c for c in colours if c in GROUPS]
+    if not colours:
+        print("no readable colours in this row")
+        return None
+    mid = (len(colours) - 1) / 2.0
+
     def group_centre(colour):
         return GROUPS.index(colour) * GROUP_SPAN + GROUP_WIDTH / 2.0
 
-    # pass 1 - a rough spot from where the three colour groups sit
-    spot = median([group_centre(c) - (j - 1) * SLOT_PITCH
+    # pass 1 - a rough spot from where the colour groups sit
+    spot = median([group_centre(c) - (j - mid) * SLOT_PITCH
                    for j, c in enumerate(colours)])
 
     # pass 2 - choose the real blocks, never the same one twice
     chosen, taken = [], []
     for j, colour in enumerate(colours):
-        n = nearest_block(colour, spot + (j - 1) * SLOT_PITCH, taken)
+        n = nearest_block(colour, spot + (j - mid) * SLOT_PITCH, taken)
         if n is None:
             print("out of", colour)
             return None
@@ -319,9 +356,9 @@ def plan_row(colours):
         chosen.append((colour, n))
 
     # pass 3 - re-centre on the blocks we actually picked
-    spot = median([block_xy(c, n)[0] - (j - 1) * SLOT_PITCH
+    spot = median([block_xy(c, n)[0] - (j - mid) * SLOT_PITCH
                    for j, (c, n) in enumerate(chosen)])
-    return [(c, n, spot + (j - 1) * SLOT_PITCH)
+    return [(c, n, spot + (j - mid) * SLOT_PITCH)
             for j, (c, n) in enumerate(chosen)]
 
 
@@ -337,15 +374,13 @@ def push_cost(plan):
 
 
 def order_pushes(plan):
-    """Middle slot first, then the outer two, each pushed inward from
-    its own side. Doing the middle first means the outer blocks always
-    stop against something already in place instead of being shoved
-    through an empty slot, and coming in from the outside means one
-    block never has to travel through another."""
-    mid = [p for p in plan if p[2] == plan[1][2]]
-    left = [p for p in plan if p[2] < plan[1][2]]
-    right = [p for p in plan if p[2] > plan[1][2]]
-    return mid + left + right
+    """Innermost slot first, then outwards. The middle block needs no
+    sideways travel at all, and doing it first gives the outer ones
+    something to stop against instead of being shoved through an empty
+    slot. Sorting by distance from the centre also copes with a row that
+    has fewer than three readable colours."""
+    centre = sum(p[2] for p in plan) / float(len(plan))
+    return sorted(plan, key=lambda p: abs(p[2] - centre))
 
 
 # ------------------------------------------------- driving in the depot
@@ -357,10 +392,12 @@ AT = [0.0, 0.0]                        # where the robot is in the depot
 
 
 async def depot_goto(x, y):
-    await turn_to(HOME + 90)
-    await drive(x - AT[0], FAST, HOME + 90)
-    await turn_to(HOME)
-    await drive(y - AT[1], FAST, HOME)
+    """Move on the block grid: along the depot, then across it. Never
+    diagonally - a diagonal cuts through the gaps between blocks."""
+    await turn_to(DEPOT_AXIS)
+    await drive(x - AT[0], FAST, DEPOT_AXIS)
+    await turn_to(DEPOT_OUT - 180)
+    await drive(y - AT[1], FAST, DEPOT_OUT - 180)
     AT[0], AT[1] = x, y
 
 
@@ -375,17 +412,17 @@ async def push_block(colour, n, slot_x):
     # line up behind the block with the pusher held clear
     await carriage(CARRIAGE_UP)
     await depot_goto(bx, by + PITCH)
-    await turn_to(HOME + 180)
+    await turn_to(DEPOT_OUT)
 
     # push stroke: down, drive, back up
     await carriage(CARRIAGE_DOWN)
-    await drive(by + PITCH - LANE_Y, SLOW, HOME + 180)
+    await drive(by + PITCH - LANE_Y, SLOW, DEPOT_OUT)
     AT[1] = LANE_Y
     await carriage(CARRIAGE_UP)
 
     # then along the lane into its slot, if it is not already there
     if abs(slot_x - bx) > 0.3:
-        side = HOME + 90 if slot_x > bx else HOME + 270
+        side = DEPOT_AXIS if slot_x > bx else DEPOT_AXIS + 180
         await depot_goto(bx - (slot_x - bx), LANE_Y)   # line up behind it
         await turn_to(side)
         await carriage(CARRIAGE_DOWN)
@@ -415,20 +452,25 @@ async def collect_and_place(row, colours):
     # Scoop all three at once. order_pushes() puts the middle slot first,
     # so plan[0] is where the centre pocket has to end up.
     await depot_goto(plan[0][2], LANE_Y - PICK_CM)
-    await turn_to(HOME + 180)
+    await turn_to(DEPOT_OUT)
     await carriage(CARRIAGE_DOWN)
     await jaws(JAWS_OPEN)
-    await drive(PICK_CM, SLOW, HOME + 180)
+    await drive(PICK_CM, SLOW, DEPOT_OUT)
     await jaws(JAWS_SHUT)
+    AT[1] = LANE_Y
     await carriage(CARRIAGE_UP)
+    await depot_goto(0.0, 0.0)                     # back to the depot corner
     await go_back(DEPOT)
 
     await go(MOSAIC)                               # and into the row
-    await drive(FIRST_CELL + CELL * row, SLOW, MOSAIC[0])
+    await turn_to(HOME)                            # square up to the grid
+    # the pockets, not the sensor, have to land on the cells
+    reach = STANDOFF - POCKET_FWD + CELL * row
+    await drive(reach, SLOW, HOME)
     await carriage(CARRIAGE_DOWN)
     await jaws(JAWS_OPEN)
     await carriage(CARRIAGE_UP)
-    await drive(-(FIRST_CELL + CELL * row), FAST, MOSAIC[0])
+    await drive(-reach, FAST, HOME)
     await go_back(MOSAIC)
     print("placed row", row, colours)
 
@@ -441,7 +483,8 @@ async def run():
     await home(GRAB, GRAB_HOME_DIR)                # grabber open = 0
     await carriage(CARRIAGE_UP)
 
-    await find_line()                              # 1
+    if not await find_line():                      # 1
+        print("running off the start position instead of a line junction")
     pattern = await scan_mosaic()                  # 2
     for row in range(ROWS - 1, -1, -1):            # 3, repeated -> 4
         await collect_and_place(row, pattern[row])
