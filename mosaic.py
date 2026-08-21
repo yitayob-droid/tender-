@@ -23,6 +23,8 @@ FAST, SLOW, SPIN = 400, 180, 250       # deg/s
 BLACK, WHITE = 20, 85                  # reflection on line / on mat
 LINE_KP = 6.0                          # line-follow gain
 
+# The grabber is three fixed pockets underneath, not a pair of jaws, so
+# "open" and "shut" release and capture all three blocks together.
 CARRIAGE_DOWN, CARRIAGE_UP = 0, 150    # pusher down / carried clear
 JAWS_OPEN, JAWS_SHUT = 0, 95
 
@@ -54,7 +56,13 @@ GROUPS = ["yellow", "blue", "green", "white"]
 # The staging lane: a clear line in front of the depot where the three
 # blocks get lined up before they are scooped.
 LANE_Y = -8.0                          # cm in front of depot row 0
-SLOT_PITCH = BLOCK                     # scooped blocks sit touching
+
+# The three pockets are one brick's short side apart. That is the GAP -
+# a block is 3.18 cm wide, so the pockets cannot be 1.59 cm apart or the
+# blocks would overlap. Centre to centre is block + gap.
+STUD = 0.8
+BRICK_SHORT = 2 * STUD                 # 1.59 cm
+SLOT_PITCH = BLOCK + BRICK_SHORT       # 4.77 cm between staging slots
 
 # Each place on the mat is (heading, distance) from the junction the
 # robot ends up on after finding the line. MEASURE THESE.
@@ -374,8 +382,9 @@ async def collect_and_place(row, colours):
     for colour, n, slot_x in plan:
         await push_block(colour, n, slot_x)
 
-    # scoop the three that are now touching, in order
-    await depot_goto(plan[0][2] - SLOT_PITCH, LANE_Y - PICK_CM)
+    # Scoop all three at once. order_pushes() puts the middle slot first,
+    # so plan[0] is where the centre pocket has to end up.
+    await depot_goto(plan[0][2], LANE_Y - PICK_CM)
     await turn_to(HOME + 180)
     await carriage(CARRIAGE_DOWN)
     await jaws(JAWS_OPEN)

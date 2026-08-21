@@ -33,7 +33,9 @@ All at the top of the file.
   on after finding the line. These are the only two places it has to find on the mat.
 - `LAYOUT` — where the 6 blocks of one colour sit, as (column, row). Edit to match.
 - `GROUPS` — the order of the colour groups along the depot, left to right.
-- `LANE_Y`, `SLOT_PITCH`, `PICK_CM` — the staging lane.
+- `LANE_Y`, `PICK_CM` — the staging lane.
+- `SLOT_PITCH` — spacing of the three pockets under the robot, derived as one block
+  plus one brick short side (4.77 cm). Every push aims at this.
 - `COLS`, `ROWS`, `CELL`, `FIRST_CELL`, `COL_STEP` — the mosaic grid (3 wide, 4 deep).
 
 ## The depot map
