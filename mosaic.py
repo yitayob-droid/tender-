@@ -26,16 +26,45 @@ LINE_KP = 6.0                          # line-follow gain
 CARRIAGE_DOWN, CARRIAGE_UP = 0, 150    # pusher down / carried clear
 JAWS_OPEN, JAWS_SHUT = 0, 95
 
-ROWS, COLS = 3, 3                      # mosaic grid
-CELL = 5.0                             # cm between cell centres
+# ---- mosaic: 3 wide, 4 deep. A row is 3 blocks = exactly one grabber load
+COLS, ROWS = 3, 4
+CELL = 5.0                             # cm between cell centres, MEASURE
 FIRST_CELL = 8.0                       # cm from the line to the first cell
 COL_STEP = 5.0                         # cm sideways between columns
 
-SLOT = 6.0                             # cm between the 3 staging slots
-PUSH_CM = 12.0                         # how far the pusher shoves a block
+# ---- depot geometry -------------------------------------------------
+# One LEGO block is 31.8 mm. Blocks of the same colour sit one block
+# apart, so centre to centre is two blocks. The colour groups sit two
+# blocks apart, so group to group is three blocks.
+BLOCK = 3.18                           # cm, one block
+PITCH = BLOCK * 2                      # 6.36 cm between same-colour blocks
+GROUP_GAP = BLOCK * 3                  # 9.54 cm between colour groups
+
+# Where the 6 blocks of one colour sit, as (column, row) in units of
+# PITCH. Row 0 is the row nearest the robot. This is the staggered
+# layout in the photo - EDIT IT to match your depot.
+LAYOUT = [(0, 0), (1, 0), (2, 0),
+          (0, 1), (1, 1), (2, 1)]
+GROUP_WIDTH = 2 * PITCH                # widest column offset in a group
+GROUP_SPAN = GROUP_WIDTH + GROUP_GAP   # start of one group to the next
+
+# Order of the colour groups along the depot, left to right
+GROUPS = ["yellow", "blue", "green", "white"]
+
+# The staging lane: a clear line in front of the depot where the three
+# blocks get lined up before they are scooped.
+LANE_Y = -8.0                          # cm in front of depot row 0
+SLOT_PITCH = BLOCK                     # scooped blocks sit touching
+
+# Each place on the mat is (heading, distance) from the junction the
+# robot ends up on after finding the line. MEASURE THESE.
+HOME = 0                               # heading of the line it works from
+DEPOT = (270, 20.0)                    # to the near corner of the depot
+MOSAIC = (0, 30.0)                     # to the near edge of the mosaic
 PICK_CM = 9.0                          # nose-in to close on the lined-up 3
 
-# colour references: normalised r,g,b. Run MODE = "COLOURS" and paste yours.
+# Colour references: normalised r, g, b. Set MODE = "COLOURS", hold the
+# sensor over each block, paste the printed triples in.
 COLOURS = {
     "white":  (0.34, 0.34, 0.32),
     "yellow": (0.46, 0.40, 0.14),
@@ -43,18 +72,6 @@ COLOURS = {
     "blue":   (0.16, 0.30, 0.54),
 }
 DARK = 90                              # below this intensity it is black
-
-# Everywhere the robot goes is (heading, distance) from the junction it
-# sits on after following the line. MEASURE THESE.
-HOME = 0                               # heading of the line it works from
-MOSAIC  = (0,   30.0)                  # to the near edge of the mosaic
-STAGING = (180, 15.0)                  # to the line the 3 blocks end up on
-STORE = {                              # to each colour's pile
-    "yellow": (270, 20.0),
-    "blue":   (270, 32.0),
-    "green":  (270, 44.0),
-    "white":  (270, 56.0),
-}
 
 MODE = "RUN"                           # RUN | COLOURS | TEST
 
@@ -206,36 +223,166 @@ async def go_back(spot):
     await turn_to(HOME)
 
 
-async def push_into_slot(colour, slot):
-    """Take one block of this colour and shove it into staging slot
-    0 / 1 / 2, carriage DOWN so the pusher is at block height."""
-    await go(STORE[colour])
-    await carriage(CARRIAGE_DOWN)                  # pusher at block height
-    await turn_to(STORE[colour][0] + 90)
-    await drive(slot * SLOT, SLOW)                 # line up with the slot
-    await turn_to(STORE[colour][0])
-    await drive(PUSH_CM, SLOW)                     # shove it across
-    await drive(-PUSH_CM, SLOW)
-    await turn_to(STORE[colour][0] + 270)
-    await drive(slot * SLOT, FAST)
-    await go_back(STORE[colour])
+# --------------------------------------------------- the depot as a map
+# Every block has an (x, y) in depot coordinates, in cm:
+#   x runs along the depot, left to right, 0 at the first yellow block
+#   y runs away from the robot, 0 at the row nearest it
+# So the whole depot is known relative to itself, and the robot only has
+# to find ONE corner of it on the mat.
+
+def block_xy(colour, n):
+    """Where block n (0-5) of this colour sits, in depot coordinates."""
+    col, row = LAYOUT[n]
+    return (GROUPS.index(colour) * GROUP_SPAN + col * PITCH, row * PITCH)
 
 
+STOCK = {c: [True] * len(LAYOUT) for c in GROUPS}     # what is left
+
+
+def nearest_block(colour, to_x, taken):
+    """Pick the block of this colour that needs the least sideways
+    shoving to reach to_x, taking from the front row first because the
+    robot can reach those without driving through the depot. `taken`
+    stops the same block being chosen twice inside one row."""
+    best, best_cost = None, 1e9
+    for n in range(len(LAYOUT)):
+        if not STOCK[colour][n] or (colour, n) in taken:
+            continue
+        bx, by = block_xy(colour, n)
+        cost = abs(bx - to_x) + by * 2.0      # back rows cost double
+        if cost < best_cost:
+            best, best_cost = n, cost
+    return best
+
+
+def median(values):
+    v = sorted(values)
+    return v[len(v) // 2]
+
+
+def plan_row(colours):
+    """Work out which three blocks to use and where to line them up.
+
+    The three have to end up touching, in order, somewhere on the lane -
+    but nothing says WHERE on the lane. So we put the lineup wherever it
+    makes the sideways pushing shortest, which is the median of the
+    three blocks' own positions (median, not average, because what we
+    are minimising is total distance, and for that the median is exact).
+
+    Done in two passes: guess a spot from the colour groups, pick the
+    real blocks nearest their slots, then re-centre on the blocks we
+    actually chose."""
+    def group_centre(colour):
+        return GROUPS.index(colour) * GROUP_SPAN + GROUP_WIDTH / 2.0
+
+    # pass 1 - a rough spot from where the three colour groups sit
+    spot = median([group_centre(c) - (j - 1) * SLOT_PITCH
+                   for j, c in enumerate(colours)])
+
+    # pass 2 - choose the real blocks, never the same one twice
+    chosen, taken = [], []
+    for j, colour in enumerate(colours):
+        n = nearest_block(colour, spot + (j - 1) * SLOT_PITCH, taken)
+        if n is None:
+            print("out of", colour)
+            return None
+        taken.append((colour, n))
+        chosen.append((colour, n))
+
+    # pass 3 - re-centre on the blocks we actually picked
+    spot = median([block_xy(c, n)[0] - (j - 1) * SLOT_PITCH
+                   for j, (c, n) in enumerate(chosen)])
+    return [(c, n, spot + (j - 1) * SLOT_PITCH)
+            for j, (c, n) in enumerate(chosen)]
+
+
+def push_cost(plan):
+    """Total driving for one ordering of the pushes, so we can compare."""
+    total, at = 0.0, (0.0, 0.0)
+    for colour, n, slot_x in plan:
+        bx, by = block_xy(colour, n)
+        total += abs(bx - at[0]) + abs(by - at[1])     # drive to the block
+        total += abs(bx - slot_x) + abs(by - LANE_Y)   # the push itself
+        at = (slot_x, LANE_Y)
+    return total
+
+
+def order_pushes(plan):
+    """Middle slot first, then the outer two, each pushed inward from
+    its own side. Doing the middle first means the outer blocks always
+    stop against something already in place instead of being shoved
+    through an empty slot, and coming in from the outside means one
+    block never has to travel through another."""
+    mid = [p for p in plan if p[2] == plan[1][2]]
+    left = [p for p in plan if p[2] < plan[1][2]]
+    right = [p for p in plan if p[2] > plan[1][2]]
+    return mid + left + right
+
+
+# ------------------------------------------------- driving in the depot
+# Inside the depot the robot moves on the block grid: along x, then
+# along y. Never diagonally, because a diagonal cuts through the gaps
+# between blocks and knocks them over.
+
+AT = [0.0, 0.0]                        # where the robot is in the depot
+
+
+async def depot_goto(x, y):
+    await turn_to(HOME + 90)
+    await drive(x - AT[0], FAST, HOME + 90)
+    await turn_to(HOME)
+    await drive(y - AT[1], FAST, HOME)
+    AT[0], AT[1] = x, y
+
+
+async def push_block(colour, n, slot_x):
+    """Shove one block out onto the lane and along to its slot, carriage
+    DOWN the whole time so the pusher is at block height."""
+    bx, by = block_xy(colour, n)
+    await carriage(CARRIAGE_DOWN)
+
+    # get behind the block, then push it forward onto the lane
+    await depot_goto(bx, by + PITCH)
+    await turn_to(HOME + 180)
+    await drive(by + PITCH - LANE_Y, SLOW, HOME + 180)
+    AT[1] = LANE_Y
+
+    # then along the lane into its slot, if it is not already there
+    if abs(slot_x - bx) > 0.3:
+        side = HOME + 90 if slot_x > bx else HOME + 270
+        await depot_goto(bx - (slot_x - bx), LANE_Y)   # line up behind it
+        await turn_to(side)
+        await drive(abs(slot_x - bx), SLOW, side)
+        AT[0] = slot_x
+
+    STOCK[colour][n] = False
+
+
+# ------------------------------------------------------------------ step 3
 async def collect_and_place(row, colours):
-    """STEP 3. Order the three blocks, pick all three up, put them in the
-    mosaic row."""
+    """STEP 3. Order three blocks on the lane, scoop all three, put them
+    in the mosaic row."""
     light_matrix.write("3")
-    for slot in range(len(colours)):
-        await push_into_slot(colours[slot], slot)
+    plan = plan_row(colours)
+    if plan is None:
+        return
+    plan = order_pushes(plan)
+    print("row", row, colours, "push %.0f cm" % push_cost(plan))
 
-    await go(STAGING)                              # pick up the ordered 3
+    await go(DEPOT)
+    AT[0], AT[1] = 0.0, 0.0
+    for colour, n, slot_x in plan:
+        await push_block(colour, n, slot_x)
+
+    # scoop the three that are now touching, in order
+    await depot_goto(plan[0][2] - SLOT_PITCH, LANE_Y - PICK_CM)
+    await turn_to(HOME + 180)
     await carriage(CARRIAGE_DOWN)
     await jaws(JAWS_OPEN)
-    await drive(PICK_CM, SLOW)
+    await drive(PICK_CM, SLOW, HOME + 180)
     await jaws(JAWS_SHUT)
     await carriage(CARRIAGE_UP)
-    await drive(-PICK_CM, FAST)
-    await go_back(STAGING)
+    await go_back(DEPOT)
 
     await go(MOSAIC)                               # and into the row
     await drive(FIRST_CELL + CELL * row, SLOW, MOSAIC[0])

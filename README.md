@@ -29,10 +29,20 @@ All at the top of the file.
 - `COLOURS` — set `MODE = "COLOURS"`, hold the sensor over each block, paste the
   printed triples in.
 - `CARRIAGE_DOWN` / `CARRIAGE_UP`, `JAWS_OPEN` / `JAWS_SHUT` — motor positions.
-- `MOSAIC`, `STAGING`, `STORE` — each is `(heading, distance)` from the junction the
-  robot sits on after finding the line.
-- `SLOT`, `PUSH_CM`, `PICK_CM` — the staging geometry.
-- `ROWS`, `COLS`, `CELL`, `FIRST_CELL`, `COL_STEP` — the mosaic grid.
+- `DEPOT`, `MOSAIC` — each is `(heading, distance)` from the junction the robot sits
+  on after finding the line. These are the only two places it has to find on the mat.
+- `LAYOUT` — where the 6 blocks of one colour sit, as (column, row). Edit to match.
+- `GROUPS` — the order of the colour groups along the depot, left to right.
+- `LANE_Y`, `SLOT_PITCH`, `PICK_CM` — the staging lane.
+- `COLS`, `ROWS`, `CELL`, `FIRST_CELL`, `COL_STEP` — the mosaic grid (3 wide, 4 deep).
+
+## The depot map
+
+`block_xy(colour, n)` gives the position of every one of the 24 blocks in depot
+coordinates, built from three numbers: a block is 3.18 cm, same-colour blocks are one
+block apart (6.36 cm centre to centre), colour groups are two blocks apart (9.54 cm).
+So the robot only has to find one corner of the depot; everything else follows from
+the grid.
 
 ## Modes
 
