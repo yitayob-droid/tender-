@@ -109,6 +109,16 @@ def step(ms):
     r = math.radians(W["h"])
     W["x"] += math.sin(r) * v * dt
     W["y"] += math.cos(r) * v * dt
+    prog = sys.modules.get("mosaic")
+    if prog is not None and hasattr(prog, "JAWS_OPEN"):
+        gp, lp = W["pos"][grab], W["pos"][lift]
+        low = lp < 60
+        if gp >= prog.JAWS_SHUT - 8 and low:
+            W["carrying"] = True
+        elif gp <= prog.JAWS_OPEN + 8 and low and W.get("carrying"):
+            W["carrying"] = False
+            W["placed"].append((round(W["x"], 1), round(W["y"], 1),
+                                round(W["t"] / 1000.0, 1)))
     if not (0 <= W["x"] <= MAT_L and 0 <= W["y"] <= MAT_W):
         W["offmat"] += 1
     if len(W["path"]) == 0 or W["t"] - W["path"][-1][2] > 60:
@@ -182,16 +192,6 @@ def install(start):
             if self.p in LIMITS:
                 lo, hi = LIMITS[self.p]
                 t = max(min(t, hi), lo)
-            _, _, lift, grab = ports()
-            if self.p == grab:
-                pr = sys.modules["mosaic"]
-                low = W["pos"][lift] < 60
-                if t >= pr.JAWS_SHUT - 5 and low:
-                    W["carrying"] = True           # closed on the three
-                elif t <= pr.JAWS_OPEN + 5 and low and W.get("carrying"):
-                    W["carrying"] = False
-                    W["placed"].append((round(W["x"], 1), round(W["y"], 1),
-                                        round(W["t"] / 1000.0, 1)))
             W["pos"][self.p] = t
             yield 60
     mot.run_to_relative_position = lambda p, pos, vel: ToPos(p, pos)

@@ -91,6 +91,8 @@ JAWS_OPEN, JAWS_SHUT = 0, 95
 # because it ends by stalling against a hard stop.
 CARRIAGE_HOME_DIR, GRAB_HOME_DIR = -1, -1
 HOME_SPEED = 200
+TOOL_SPEED = 500                       # deg/s for carriage and grabber moves
+TURN_TIMEOUT_MS = 5000                 # a turn that takes longer has a fault
 
 # ---- mosaic. The size is whatever you typed into PATTERN above.
 ROWS = len(TILES)
@@ -171,9 +173,13 @@ DARK = 90                              # below this intensity it is black
 # "TYPED" trusts the letter grid at the top of the file and skips the
 # scan, which saves about 30 seconds. "SCAN" reads the mat and prints any
 # row that disagrees with what you typed.
-PATTERN_SOURCE = "TYPED"               # TYPED | SCAN
+PATTERN_SOURCE = "SCAN"                # SCAN | TYPED
 
-MODE = "RUN"                           # RUN | COLOURS | TEST
+# RUN      the whole mission
+# MOVE     turn each motor on in turn - use this first if nothing moves
+# TEST     drive, turn, home, and cycle both tools
+# COLOURS  print what the colour sensor sees
+MODE = "RUN"
 
 
 # ------------------------------------------------------------------ basics
@@ -203,7 +209,13 @@ async def turn_to(heading, tol=0.5):
     something like 20 cm of drift across a run. It has to settle inside
     the band rather than just touch it, or the robot hunts."""
     settled = 0
+    t = 0
     while True:
+        if t > TURN_TIMEOUT_MS:
+            print("turn to %.0f gave up %.1f deg out - check the gyro and"
+                  " the wheel signs" % (heading, error_to(heading)))
+            break
+        t += 10
         e = error_to(heading)
         if abs(e) < tol:
             stop()
@@ -232,7 +244,14 @@ async def drive(cm, speed=FAST, heading=None):
     motor.reset_relative_position(LEFT, 0)
     goal = abs(cm) / WHEEL_CM * 360.0
     way = 1 if cm > 0 else -1
+    t, limit = 0, int(abs(cm) / 3.0 * 1000) + 3000     # 3 cm/s worst case
     while abs(motor.relative_position(LEFT)) < goal:
+        if t > limit:
+            done = abs(motor.relative_position(LEFT)) / 360.0 * WHEEL_CM
+            print("drive stalled: %.1f cm of %.1f - blocked, or a wheel is"
+                  " on the wrong port" % (done, abs(cm)))
+            break
+        t += 10
         c = error_to(heading) * 5.0
         wheels(way * speed + c, way * speed - c)
         await runloop.sleep_ms(10)
@@ -245,7 +264,12 @@ async def follow_line(cm, speed=SLOW):
     mid = (BLACK + WHITE) / 2.0
     motor.reset_relative_position(LEFT, 0)
     goal = cm / WHEEL_CM * 360.0
+    t, limit = 0, int(cm / 3.0 * 1000) + 3000
     while abs(motor.relative_position(LEFT)) < goal:
+        if t > limit:
+            print("line following stalled")
+            break
+        t += 10
         c = (mid - color_sensor.reflection(EYE)) * LINE_KP
         wheels(speed + c, speed - c)
         await runloop.sleep_ms(10)
@@ -305,12 +329,87 @@ async def home(m, direction, timeout_ms=2500):
     motor.reset_relative_position(m, 0)
 
 
+async def run_tool(m, target, name, tol=6, timeout_ms=3000):
+    """Drive a tool motor to a position under our own control.
+
+    run_to_relative_position() blocks until it arrives, so if the
+    mechanism cannot reach the number it is given the whole program stops
+    dead with the robot sitting still. This gives up instead, and says
+    so."""
+    t, slow = 0, 0
+    while t < timeout_ms:
+        err = target - motor.relative_position(m)
+        if abs(err) <= tol:
+            break
+        p = max(min(err * 4, TOOL_SPEED), -TOOL_SPEED)
+        if abs(p) < 120:
+            p = 120 if p > 0 else -120
+        motor.run(m, int(p))
+        if abs(motor.velocity(m)) < 20:
+            slow += 20
+            if slow > 400:                          # jammed on something
+                print(name, "stalled at", motor.relative_position(m),
+                      "on the way to", target)
+                break
+        else:
+            slow = 0
+        await runloop.sleep_ms(20)
+        t += 20
+    else:
+        print(name, "did not reach", target, "- stopped at",
+              motor.relative_position(m))
+    motor.stop(m)
+    await runloop.sleep_ms(50)
+
+
 async def carriage(pos):
-    await motor.run_to_relative_position(CARRIAGE, pos, 500)
+    await run_tool(CARRIAGE, pos, "carriage")
 
 
 async def jaws(pos):
-    await motor.run_to_relative_position(GRAB, pos, 500)
+    await run_tool(GRAB, pos, "grabber")
+
+
+def check_ports():
+    """Name the device that is not answering, instead of the program
+    dying on its first move with nothing on the display."""
+    ok = True
+    for name, p in (("A left wheel", LEFT), ("E right wheel", RIGHT),
+                    ("B grabber", GRAB), ("C carriage", CARRIAGE)):
+        try:
+            motor.relative_position(p)
+        except Exception as e:
+            print("PORT", name, "is not answering -", e)
+            ok = False
+    try:
+        color_sensor.reflection(EYE)
+    except Exception as e:
+        print("PORT F colour sensor is not answering -", e)
+        ok = False
+    if ok:
+        print("all five ports answered")
+    return ok
+
+
+async def move_test():
+    """The simplest question: does anything turn at all? Each motor runs
+    on its own for a second, and prints how far it actually got."""
+    check_ports()
+    for name, m in (("A left wheel", LEFT), ("E right wheel", RIGHT),
+                    ("B grabber", GRAB), ("C carriage", CARRIAGE)):
+        print("running", name, "...")
+        motor.reset_relative_position(m, 0)
+        motor.run(m, 300)
+        await runloop.sleep_ms(1000)
+        motor.stop(m)
+        await runloop.sleep_ms(300)
+        moved = motor.relative_position(m)
+        print("   ", name, "moved", moved, "degrees",
+              "" if abs(moved) > 50 else "  <-- BARELY MOVED, check this one")
+    print("now both wheels together - the robot should drive forwards")
+    wheels(300, 300)
+    await runloop.sleep_ms(1500)
+    stop()
 
 
 # ------------------------------------------------------------------ step 2
@@ -564,6 +663,9 @@ async def collect_and_place(row, colours):
 # ------------------------------------------------------------------ main
 async def run():
     show_pattern(TILES, "mosaic to build (%d wide, %d deep):" % (COLS, ROWS))
+    if not check_ports():
+        print("fix the ports above before running the mission")
+        return
     motion_sensor.reset_yaw(0)
     await runloop.sleep_ms(300)
     await home(CARRIAGE, CARRIAGE_HOME_DIR)        # carriage down = 0
@@ -615,13 +717,23 @@ async def test():
 
 
 async def main():
-    if MODE == "COLOURS":
-        await show_colours()
-    elif MODE == "TEST":
-        await test()
-    else:
-        await run()
+    try:
+        if MODE == "COLOURS":
+            await show_colours()
+        elif MODE == "MOVE":
+            await move_test()
+        elif MODE == "TEST":
+            await test()
+        else:
+            await run()
+    except Exception as e:
+        # without this the hub just stops and the robot sits there with
+        # no clue as to why
+        print("STOPPED BY AN ERROR:", e)
+        light_matrix.write("ERR")
     stop()
+    motor.stop(GRAB)
+    motor.stop(CARRIAGE)
 
 
 runloop.run(main())
