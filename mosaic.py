@@ -365,24 +365,33 @@ async def depot_goto(x, y):
 
 
 async def push_block(colour, n, slot_x):
-    """Shove one block out onto the lane and along to its slot, carriage
-    DOWN the whole time so the pusher is at block height."""
-    bx, by = block_xy(colour, n)
-    await carriage(CARRIAGE_DOWN)
+    """Shove one block out onto the lane and along to its slot.
 
-    # get behind the block, then push it forward onto the lane
+    The three pockets ARE the pusher, so the carriage only comes down
+    for the push stroke itself. Driving across the depot with it down
+    would plough through every other block on the way."""
+    bx, by = block_xy(colour, n)
+
+    # line up behind the block with the pusher held clear
+    await carriage(CARRIAGE_UP)
     await depot_goto(bx, by + PITCH)
     await turn_to(HOME + 180)
+
+    # push stroke: down, drive, back up
+    await carriage(CARRIAGE_DOWN)
     await drive(by + PITCH - LANE_Y, SLOW, HOME + 180)
     AT[1] = LANE_Y
+    await carriage(CARRIAGE_UP)
 
     # then along the lane into its slot, if it is not already there
     if abs(slot_x - bx) > 0.3:
         side = HOME + 90 if slot_x > bx else HOME + 270
         await depot_goto(bx - (slot_x - bx), LANE_Y)   # line up behind it
         await turn_to(side)
+        await carriage(CARRIAGE_DOWN)
         await drive(abs(slot_x - bx), SLOW, side)
         AT[0] = slot_x
+        await carriage(CARRIAGE_UP)
 
     STOCK[colour][n] = False
 
