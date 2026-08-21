@@ -1,9 +1,11 @@
 # WRO 2026 "Mosaic Masters" - robot 13
 #
-#   1  find the black line
-#   2  scan the mosaic, one column at a time, and store the pattern
-#   3  push blocks into colour order, pick up the 3, place them in a row
-#   4  repeat 3 until the mosaic is solved
+#   1  drive the course to the mosaic and scan it
+#   2  push blocks into colour order, pick up the 3, place them in a row
+#   3  repeat until the mosaic is solved
+#
+# No line following - the course is a list of plain moves near the top
+# of this file, held straight by the gyro.
 #
 # Ports:  A left wheel   B grabber   C carriage/pusher   E right wheel
 #         F colour sensor (front, pointing down)
@@ -98,9 +100,6 @@ LEFT_SIGN, RIGHT_SIGN = 1, -1          # flip if it drives backwards / spins
 WHEEL_CM = 17.6                        # wheel circumference, MEASURE THIS
 FAST, SLOW, SPIN = 400, 180, 250       # deg/s
 
-BLACK, WHITE = 20, 85                  # reflection on line / on mat
-LINE_KP = 6.0                          # line-follow gain
-
 # The grabber is three fixed pockets underneath, not a pair of jaws, so
 # "open" and "shut" release and capture all three blocks together.
 CARRIAGE_DOWN, CARRIAGE_UP = 0, 150    # pusher down / carried clear
@@ -167,16 +166,31 @@ STUD = 0.8
 BRICK_SHORT = 2 * STUD                 # 1.59 cm
 SLOT_PITCH = BLOCK + BRICK_SHORT       # 4.77 cm between staging slots
 
-# Each place on the mat is (heading, distance) from the junction the
-# robot ends up on after finding the line. MEASURE THESE.
-HOME = 0                               # heading of the line it works from
-# Bearings and distances measured off the overhead photo of the mat,
-# from the ROBOMISSION corner where the robot starts. Re-measure once
-# find_line() settles on its junction, because these move with it.
-DEPOT = (345, 25.7)                    # to the near corner of the depot
-MOSAIC = (74, 81.1)                    # to a spot STANDOFF cm in front of
-                                       # the NEAREST cell of the LEFTMOST
-                                       # column
+# =====================================================================
+#  THE COURSE - plain moves, no line following.
+#
+#      ("go", 30)      drive straight 30 cm   (negative reverses)
+#      ("left", 90)    turn 90 degrees left
+#      ("right", 45)   turn 45 degrees right
+#
+#  The gyro holds every heading, so the robot stays square the whole run
+#  and the turns do not drift. Each route is driven backwards to come
+#  home, so you only write it out once.
+#
+#  Place the robot in the starting square pointing UP the mat, the way
+#  you want "straight" to mean.
+# =====================================================================
+TO_DEPOT = [
+    ("left", 15),
+    ("go", 26),
+]
+
+TO_MOSAIC = [
+    ("right", 74),
+    ("go", 81),
+]
+
+HOME = 0                               # the heading it starts on
 PICK_CM = 9.0                          # nose-in to close on the lined-up 3
 PUSH_STANDOFF = 3.0                    # the pusher parks this far behind a
                                        # block before shoving it
@@ -283,49 +297,6 @@ async def drive(cm, speed=FAST, heading=None):
         await runloop.sleep_ms(10)
     stop()
     await runloop.sleep_ms(60)
-
-
-async def follow_line(cm, speed=SLOW):
-    """Step 1's payoff: track the edge of the black line for a distance."""
-    mid = (BLACK + WHITE) / 2.0
-    motor.reset_relative_position(LEFT, 0)
-    goal = cm / WHEEL_CM * 360.0
-    t, limit = 0, int(cm / 3.0 * 1000) + 3000
-    while abs(motor.relative_position(LEFT)) < goal:
-        if t > limit:
-            print("line following stalled")
-            break
-        t += 10
-        c = (mid - color_sensor.reflection(EYE)) * LINE_KP
-        wheels(speed + c, speed - c)
-        await runloop.sleep_ms(10)
-    stop()
-    await runloop.sleep_ms(60)
-
-
-async def find_line(max_cm=60.0, speed=SLOW):
-    """STEP 1. Creep forward until the sensor is over the black line.
-
-    If there is no line within reach, back up to where the search
-    started. Every position in this program is measured from that spot,
-    so leaving the robot 60 cm up the mat would throw off everything
-    after it."""
-    light_matrix.write("1")
-    motor.reset_relative_position(LEFT, 0)
-    goal = max_cm / WHEEL_CM * 360.0
-    while color_sensor.reflection(EYE) > BLACK + 10:
-        if abs(motor.relative_position(LEFT)) > goal:
-            stop()
-            gone = abs(motor.relative_position(LEFT)) / 360.0 * WHEEL_CM
-            print("no line within %.0f cm - backing up %.0f cm to the start"
-                  % (max_cm, gone))
-            await drive(-gone, SLOW)
-            return False
-        wheels(speed, speed)
-        await runloop.sleep_ms(10)
-    stop()
-    await runloop.sleep_ms(60)
-    return True
 
 
 def read_colour():
@@ -450,8 +421,8 @@ async def scan_mosaic():
     Returns pattern[row][col], row 0 = nearest the robot."""
     light_matrix.write("2")
     pattern = [["?"] * COLS for _ in range(ROWS)]
-    await go(MOSAIC)
-    await turn_to(HOME)                            # square up to the grid
+    await follow(TO_MOSAIC)
+    await face(HOME)                               # square up to the grid
     lane = HOME                                    # heading down the columns
     first = STANDOFF - SENSOR_FWD                  # sensor onto the near row
 
@@ -469,25 +440,75 @@ async def scan_mosaic():
 
     await turn_to(lane + 270)                      # back to the first column
     await drive(COL_STEP * (COLS - 1), SLOW)
-    await go_back(MOSAIC)
+    await unfollow(TO_MOSAIC)
     print("pattern", pattern)
     return pattern
 
 
 # ------------------------------------------------------------------ step 3
-async def go(spot):
-    """Turn and drive out to a place on the mat."""
-    heading, distance = spot
+AIM = [0.0]                            # the heading the course is on
+
+
+async def go(cm, speed=FAST):
+    """Straight, holding whatever heading the course is currently on."""
+    await drive(cm, speed, AIM[0])
+
+
+async def left(deg):
+    AIM[0] -= deg
+    await turn_to(AIM[0])
+
+
+async def right(deg):
+    AIM[0] += deg
+    await turn_to(AIM[0])
+
+
+async def face(heading):
+    AIM[0] = heading
     await turn_to(heading)
-    await drive(distance, FAST)
 
 
-async def go_back(spot):
-    """Reverse the trip and face down the line again."""
-    heading, distance = spot
-    await turn_to(heading + 180)
-    await drive(distance, FAST)
-    await turn_to(HOME)
+async def follow(steps):
+    """Drive a list of moves."""
+    for what, amount in steps:
+        if what == "go":
+            await go(amount)
+        elif what == "left":
+            await left(amount)
+        elif what == "right":
+            await right(amount)
+        else:
+            print("unknown move:", what)
+
+
+def route_heading(steps, start=0.0):
+    """The heading a route finishes on, so we can get back onto it."""
+    h = start
+    for what, amount in steps:
+        if what == "left":
+            h -= amount
+        elif what == "right":
+            h += amount
+    return h
+
+
+async def unfollow(steps):
+    """Drive the same list backwards to get home: reversed order, drives
+    become reverses, and lefts become rights.
+
+    It squares up onto the heading the route finished on first. Whatever
+    the robot did at the far end - scanning, pushing - has left it
+    pointing somewhere else, and reversing from there goes nowhere near
+    the start."""
+    await face(route_heading(steps, HOME))
+    for what, amount in reversed(steps):
+        if what == "go":
+            await go(-amount)
+        elif what == "left":
+            await right(amount)
+        elif what == "right":
+            await left(amount)
 
 
 # --------------------------------------------------- the depot as a map
@@ -657,7 +678,7 @@ async def collect_and_place(row, colours):
     plan = order_pushes(plan)
     print("row", row, colours, "push %.0f cm" % push_cost(plan))
 
-    await go(DEPOT)
+    await follow(TO_DEPOT)
     AT[0], AT[1] = 0.0, 0.0
     for colour, n, slot_x in plan:
         await push_block(colour, n, slot_x)
@@ -676,10 +697,10 @@ async def collect_and_place(row, colours):
     AT[1] = LANE_Y
     await carriage(CARRIAGE_UP)
     await depot_goto(0.0, 0.0)                     # back to the depot corner
-    await go_back(DEPOT)
+    await unfollow(TO_DEPOT)
 
-    await go(MOSAIC)                               # and into the row
-    await turn_to(HOME)                            # square up to the grid
+    await follow(TO_MOSAIC)                        # and into the row
+    await face(HOME)                               # square up to the grid
     # the pockets, not the sensor, have to land on the cells
     reach = STANDOFF - POCKET_FWD + CELL * row
     await drive(reach, SLOW, HOME)
@@ -687,7 +708,7 @@ async def collect_and_place(row, colours):
     await jaws(JAWS_OPEN)
     await carriage(CARRIAGE_UP)
     await drive(-reach, FAST, HOME)
-    await go_back(MOSAIC)
+    await unfollow(TO_MOSAIC)
     print("placed row", row, colours)
 
 
@@ -706,8 +727,6 @@ async def run():
     await home(GRAB, GRAB_HOME_DIR)                # grabber open = 0
     await carriage(CARRIAGE_UP)
 
-    if not await find_line():                      # 1
-        print("running off the start position instead of a line junction")
     if PATTERN_SOURCE == "SCAN":                   # 2
         pattern = await scan_mosaic()
         show_pattern(pattern, "scanned:")
@@ -768,10 +787,10 @@ async def only_depot():
     check_ports()
     motion_sensor.reset_yaw(0)
     await runloop.sleep_ms(300)
-    await go(DEPOT)
+    await follow(TO_DEPOT)
     print("this should be the near corner of the depot")
     await runloop.sleep_ms(2000)
-    await go_back(DEPOT)
+    await unfollow(TO_DEPOT)
     print("and this should be where you started")
 
 

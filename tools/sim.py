@@ -245,11 +245,19 @@ def mosaic_colour_at(sx, sy):
 
 
 # ------------------------------------------------------------- the report
-def where_program_thinks(mod, spot, junction):
-    """Where a (heading, distance) in the program actually lands you."""
-    h, d = spot
-    r = math.radians(junction[2] + h)
-    return (junction[0] + math.sin(r) * d, junction[1] + math.cos(r) * d)
+def route_end(steps, start):
+    """Walk a list of plain moves and say where it finishes."""
+    x, y, h = start
+    for what, amount in steps:
+        if what == "left":
+            h -= amount
+        elif what == "right":
+            h += amount
+        elif what == "go":
+            r = math.radians(h)
+            x += math.sin(r) * amount
+            y += math.cos(r) * amount
+    return (x, y)
 
 
 def main():
@@ -283,17 +291,14 @@ def main():
     print("\n" + "=" * 68)
     print("WHAT THE PROGRAM ASSUMES vs WHAT IS THERE")
     print("=" * 68)
-    junction = W.get("junction", start)
-    print("  step 1 %s" % ("found a line at %.1f, %.1f" % junction[:2]
-                           if "junction" in W else
-                           "found NO line - using the start position"))
+    junction = start
     mx, my = REAL["mosaic"]
     want_mosaic = (mx - (mod.COLS - 1) / 2.0 * mod.CELL,
                    my - (mod.ROWS - 1) / 2.0 * mod.CELL - mod.STANDOFF)
-    for name, spot, real_key, target in (
-            ("DEPOT", mod.DEPOT, "yellow left", REAL["yellow left"]),
-            ("MOSAIC", mod.MOSAIC, "its approach spot", want_mosaic)):
-        gx, gy = where_program_thinks(mod, spot, junction)
+    for name, steps, real_key, target in (
+            ("TO_DEPOT", mod.TO_DEPOT, "yellow left", REAL["yellow left"]),
+            ("TO_MOSAIC", mod.TO_MOSAIC, "its approach spot", want_mosaic)):
+        gx, gy = route_end(steps, junction)
         rx, ry = target
         print("  %-7s sends the robot to %6.1f, %5.1f" % (name, gx, gy))
         print("          %-14s is at %6.1f, %5.1f   -> out by %.0f cm"
@@ -357,8 +362,8 @@ def draw(start):
 
     # where the program thinks things are
     mod = sys.modules["mosaic"]
-    for spot, tag in ((mod.DEPOT, "DEPOT"), (mod.MOSAIC, "MOSAIC")):
-        gx, gy = where_program_thinks(mod, spot, start)
+    for steps, tag in ((mod.TO_DEPOT, "DEPOT"), (mod.TO_MOSAIC, "MOSAIC")):
+        gx, gy = route_end(steps, start)
         p = px(gx, gy)
         d.ellipse([p[0] - 7, p[1] - 7, p[0] + 7, p[1] + 7],
                   outline=(255, 80, 0), width=3)
