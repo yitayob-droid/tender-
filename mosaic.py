@@ -28,6 +28,13 @@ LINE_KP = 6.0                          # line-follow gain
 CARRIAGE_DOWN, CARRIAGE_UP = 0, 150    # pusher down / carried clear
 JAWS_OPEN, JAWS_SHUT = 0, 95
 
+# Homing: the direction that runs each tool to the end stop that counts
+# as zero - carriage all the way down, grabber all the way open. Flip a
+# sign if a tool homes the wrong way. HOME_SPEED is deliberately gentle
+# because it ends by stalling against a hard stop.
+CARRIAGE_HOME_DIR, GRAB_HOME_DIR = -1, -1
+HOME_SPEED = 200
+
 # ---- mosaic: 3 wide, 4 deep. A row is 3 blocks = exactly one grabber load
 COLS, ROWS = 3, 4
 CELL = 5.0                             # cm between cell centres, MEASURE
@@ -176,6 +183,20 @@ def read_colour():
         if d < best_d:
             best, best_d = name, d
     return best
+
+
+async def home(m, direction, timeout_ms=2500):
+    """Run a tool gently against its end stop and call that zero, so it
+    does not matter what position the robot is handed over in."""
+    motor.run(m, direction * HOME_SPEED)
+    await runloop.sleep_ms(300)                    # let it get moving
+    t = 0
+    while t < timeout_ms and abs(motor.velocity(m)) > 20:
+        await runloop.sleep_ms(20)
+        t += 20
+    motor.stop(m)
+    await runloop.sleep_ms(150)
+    motor.reset_relative_position(m, 0)
 
 
 async def carriage(pos):
@@ -407,10 +428,9 @@ async def collect_and_place(row, colours):
 async def run():
     motion_sensor.reset_yaw(0)
     await runloop.sleep_ms(300)
-    motor.reset_relative_position(CARRIAGE, 0)
-    motor.reset_relative_position(GRAB, 0)
+    await home(CARRIAGE, CARRIAGE_HOME_DIR)        # carriage down = 0
+    await home(GRAB, GRAB_HOME_DIR)                # grabber open = 0
     await carriage(CARRIAGE_UP)
-    await jaws(JAWS_OPEN)
 
     await find_line()                              # 1
     pattern = await scan_mosaic()                  # 2
@@ -438,8 +458,9 @@ async def test():
     await drive(-50)
     await turn_to(90)
     await turn_to(0)
-    motor.reset_relative_position(CARRIAGE, 0)
-    motor.reset_relative_position(GRAB, 0)
+    await home(CARRIAGE, CARRIAGE_HOME_DIR)
+    await home(GRAB, GRAB_HOME_DIR)
+    print("homed - carriage and grabber are both at 0")
     await carriage(CARRIAGE_UP)
     await carriage(CARRIAGE_DOWN)
     await jaws(JAWS_SHUT)

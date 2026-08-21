@@ -29,6 +29,8 @@ All at the top of the file.
 - `COLOURS` — set `MODE = "COLOURS"`, hold the sensor over each block, paste the
   printed triples in.
 - `CARRIAGE_DOWN` / `CARRIAGE_UP`, `JAWS_OPEN` / `JAWS_SHUT` — motor positions.
+- `CARRIAGE_HOME_DIR` / `GRAB_HOME_DIR` — which way each tool runs to find its end
+  stop. Flip a sign if a tool homes the wrong way.
 - `DEPOT`, `MOSAIC` — each is `(heading, distance)` from the junction the robot sits
   on after finding the line. These are the only two places it has to find on the mat.
 - `LAYOUT` — where the 6 blocks of one colour sit, as (column, row). Edit to match.
@@ -53,3 +55,10 @@ and back, turn 90 and back, cycle the carriage and jaws.
 
 If it drives backwards, flip both `LEFT_SIGN` and `RIGHT_SIGN`. If it spins instead of
 driving, flip one.
+
+## Starting position
+
+It does not matter. At the start of every run the carriage and the grabber are driven
+gently against their end stops and *that* is called zero, so the robot can be handed
+over in any state. `MODE = "TEST"` homes and prints when it is done, which is the
+quickest way to check the two `HOME_DIR` signs are right.
