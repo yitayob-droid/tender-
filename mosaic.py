@@ -13,6 +13,63 @@ import motor
 import color_sensor
 from hub import port, motion_sensor, light_matrix
 
+# =====================================================================
+#  THE MOSAIC PATTERN - this is the only thing you should need to change
+#  when the pattern is different on the day.
+#
+#      Y yellow    B blue    G green    W white    . leave empty
+#
+#  Write it out exactly as it looks on the mat, with the row NEAREST the
+#  green part of the map at the top. Spaces are ignored, so line it up
+#  however is easiest to read. The size of the mosaic is taken from what
+#  you type here, so a 3x4 or a 4x4 both just work.
+# =====================================================================
+PATTERN = """
+    Y Y Y
+    W B W
+    W B W
+    G W G
+"""
+
+LETTERS = {"Y": "yellow", "B": "blue", "G": "green", "W": "white",
+           ".": None, "-": None}
+
+
+def parse_pattern(text):
+    """Turn the letter grid above into pattern[row][col], complaining
+    about anything it does not recognise instead of failing later."""
+    grid = []
+    for lineno, line in enumerate(text.strip().splitlines()):
+        row = []
+        for ch in line.replace(" ", "").replace("\t", "").upper():
+            if ch in LETTERS:
+                row.append(LETTERS[ch])
+            else:
+                print("PATTERN line", lineno + 1, "- unknown letter", ch,
+                      "(use Y B G W or .)")
+        if row:
+            grid.append(row)
+    if not grid:
+        print("PATTERN is empty")
+        return grid
+    width = len(grid[0])
+    for i, row in enumerate(grid):
+        if len(row) != width:
+            print("PATTERN line", i + 1, "has", len(row), "tiles but the"
+                  " first line has", width)
+    return grid
+
+
+def show_pattern(grid, title):
+    print(title)
+    back = {v: k for k, v in LETTERS.items() if v}
+    for row in grid:
+        print("   ", " ".join(back.get(c, ".") for c in row))
+
+
+TILES = parse_pattern(PATTERN)
+
+
 # ------------------------------------------------------------------ tune
 LEFT, RIGHT, GRAB, CARRIAGE, EYE = port.A, port.E, port.B, port.C, port.F
 LEFT_SIGN, RIGHT_SIGN = 1, -1          # flip if it drives backwards / spins
@@ -35,8 +92,9 @@ JAWS_OPEN, JAWS_SHUT = 0, 95
 CARRIAGE_HOME_DIR, GRAB_HOME_DIR = -1, -1
 HOME_SPEED = 200
 
-# ---- mosaic: 3 wide, 4 deep. A row is 3 blocks = exactly one grabber load
-COLS, ROWS = 3, 4
+# ---- mosaic. The size is whatever you typed into PATTERN above.
+ROWS = len(TILES)
+COLS = len(TILES[0]) if TILES else 0
 CELL = 5.0                             # cm between cell centres, MEASURE
 COL_STEP = CELL                        # columns are one cell apart
 STANDOFF = 12.0                        # cm from where MOSAIC parks you to
@@ -110,16 +168,10 @@ COLOURS = {
 }
 DARK = 90                              # below this intensity it is black
 
-# The pattern on the mat, read off by eye. Row 0 is the one nearest the
-# green part of the map. Used when PATTERN_SOURCE is "FIXED", and worth
-# keeping up to date as a check on what the scan reads.
-FIXED_PATTERN = [
-    ["yellow", "yellow", "yellow"],
-    ["white",  "blue",   "white"],
-    ["white",  "blue",   "white"],
-    ["green",  "white",  "green"],
-]
-PATTERN_SOURCE = "SCAN"                # SCAN | FIXED
+# "TYPED" trusts the letter grid at the top of the file and skips the
+# scan, which saves about 30 seconds. "SCAN" reads the mat and prints any
+# row that disagrees with what you typed.
+PATTERN_SOURCE = "TYPED"               # TYPED | SCAN
 
 MODE = "RUN"                           # RUN | COLOURS | TEST
 
@@ -511,6 +563,7 @@ async def collect_and_place(row, colours):
 
 # ------------------------------------------------------------------ main
 async def run():
+    show_pattern(TILES, "mosaic to build (%d wide, %d deep):" % (COLS, ROWS))
     motion_sensor.reset_yaw(0)
     await runloop.sleep_ms(300)
     await home(CARRIAGE, CARRIAGE_HOME_DIR)        # carriage down = 0
@@ -519,15 +572,15 @@ async def run():
 
     if not await find_line():                      # 1
         print("running off the start position instead of a line junction")
-    if PATTERN_SOURCE == "FIXED":                  # 2
-        pattern = FIXED_PATTERN
-        print("using the pattern typed into FIXED_PATTERN")
-    else:
+    if PATTERN_SOURCE == "SCAN":                   # 2
         pattern = await scan_mosaic()
-        for r in range(ROWS):
-            if pattern[r] != FIXED_PATTERN[r]:
+        show_pattern(pattern, "scanned:")
+        for r in range(min(ROWS, len(pattern))):
+            if pattern[r] != TILES[r]:
                 print("row", r, "scanned", pattern[r],
-                      "but FIXED_PATTERN says", FIXED_PATTERN[r])
+                      "but you typed", TILES[r])
+    else:
+        pattern = TILES
     for row in range(ROWS - 1, -1, -1):            # 3, repeated -> 4
         await collect_and_place(row, pattern[row])
 
